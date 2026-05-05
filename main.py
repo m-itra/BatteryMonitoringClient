@@ -1,4 +1,4 @@
-"""Compatibility exports for the Windows battery collector module."""
+"""Compatibility exports and desktop app launcher."""
 
 from windows_battery_collector import (
     BatterySnapshot,
@@ -12,3 +12,9 @@ __all__ = [
     "WindowsBatteryCollector",
     "WindowsBatteryCollectorError",
 ]
+
+
+if __name__ == "__main__":
+    from app.main import main
+
+    raise SystemExit(main())
