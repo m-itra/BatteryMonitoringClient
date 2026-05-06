@@ -153,6 +153,54 @@ class SampleQueueService:
             cursor = connection.execute("DELETE FROM local_samples")
             return int(cursor.rowcount)
 
+    def prune_local_history_to_recent_sessions(
+        self,
+        max_completed_sessions: int,
+        *,
+        completion_samples: int,
+    ) -> dict[str, int]:
+        rows = self._local_sample_rows()
+        if not rows:
+            return {
+                "deleted_samples": 0,
+                "completed_sessions": 0,
+                "kept_completed_sessions": 0,
+                "kept_samples": 0,
+                "storage_bytes": self.local_storage_size_bytes(),
+            }
+
+        completed_sessions, open_session_ids = self._power_sessions_from_rows(
+            rows,
+            completion_samples=completion_samples,
+        )
+        kept_completed_sessions = completed_sessions[-max_completed_sessions:]
+        keep_ids = {
+            sample_id
+            for session in kept_completed_sessions
+            for sample_id in session
+        }
+        keep_ids.update(open_session_ids)
+
+        all_ids = {int(row["id"]) for row in rows}
+        delete_ids = sorted(all_ids - keep_ids)
+        deleted_samples = self._delete_local_samples(delete_ids)
+        return {
+            "deleted_samples": deleted_samples,
+            "completed_sessions": len(completed_sessions),
+            "kept_completed_sessions": len(kept_completed_sessions),
+            "kept_samples": len(keep_ids),
+            "storage_bytes": self.local_storage_size_bytes(),
+        }
+
+    def local_storage_size_bytes(self) -> int:
+        database_path = self.database.path
+        paths = [
+            database_path,
+            database_path.with_name(f"{database_path.name}-wal"),
+            database_path.with_name(f"{database_path.name}-shm"),
+        ]
+        return sum(path.stat().st_size for path in paths if path.exists())
+
     @staticmethod
     def upload_samples(samples: list[QueuedSample]) -> list[dict[str, Any]]:
         upload_payload: list[dict[str, Any]] = []
@@ -163,6 +211,84 @@ class SampleQueueService:
             )
             upload_payload.append(item)
         return upload_payload
+
+    def _local_sample_rows(self) -> list[Any]:
+        with self.database.connect() as connection:
+            return connection.execute(
+                """
+                SELECT id, payload_json
+                FROM local_samples
+                ORDER BY id ASC
+                """
+            ).fetchall()
+
+    def _delete_local_samples(self, sample_ids: list[int]) -> int:
+        deleted_samples = 0
+        for index in range(0, len(sample_ids), 900):
+            chunk = sample_ids[index : index + 900]
+            if not chunk:
+                continue
+
+            placeholders = ",".join("?" for _ in chunk)
+            with self.database.connect() as connection:
+                cursor = connection.execute(
+                    f"DELETE FROM local_samples WHERE id IN ({placeholders})",
+                    chunk,
+                )
+                deleted_samples += int(cursor.rowcount)
+        return deleted_samples
+
+    @classmethod
+    def _power_sessions_from_rows(
+        cls,
+        rows: list[Any],
+        *,
+        completion_samples: int,
+    ) -> tuple[list[list[int]], list[int]]:
+        completed_sessions: list[list[int]] = []
+        active_session: list[int] = []
+        ac_completion_count = 0
+
+        for row in rows:
+            sample_id = int(row["id"])
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError:
+                payload = {}
+
+            if cls._is_discharging_payload(payload):
+                if not active_session:
+                    active_session = []
+                active_session.append(sample_id)
+                ac_completion_count = 0
+                continue
+
+            if not active_session:
+                continue
+
+            active_session.append(sample_id)
+            if payload.get("ac_connected") is True:
+                ac_completion_count += 1
+                if ac_completion_count >= completion_samples:
+                    completed_sessions.append(active_session)
+                    active_session = []
+                    ac_completion_count = 0
+            else:
+                ac_completion_count = 0
+
+        return completed_sessions, active_session
+
+    @staticmethod
+    def _is_discharging_payload(payload: dict[str, Any]) -> bool:
+        net_power = payload.get("net_power_mw")
+        if isinstance(net_power, (int, float)):
+            return net_power > 0
+        if payload.get("status") == "discharging":
+            return True
+        return (
+            payload.get("ac_connected") is False
+            and payload.get("is_charging") is not True
+        )
 
     @staticmethod
     def _backend_client_time(value: Any) -> Any:

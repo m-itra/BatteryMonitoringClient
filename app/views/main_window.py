@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.app_context import AppContext
+from app.config import DEFAULT_POLL_INTERVAL_MS as SAMPLE_CHANGE_CHECK_INTERVAL_MS
 from app.models.device import DeviceSummary
 from app.models.telemetry import UploadResult
 from app.services.api_client import ApiError
@@ -834,6 +835,7 @@ SYNC_STATE_LABELS = {
     "uploading": "Uploading",
     "offline": "Offline",
     "waiting for discharge": "Waiting for discharge",
+    "waiting for change": "Waiting for change",
     "waiting for AC confirmation": "Waiting for AC confirmation",
     "uploaded": "Uploaded",
     "empty": "Queue empty",
@@ -903,7 +905,6 @@ class StatusTab(QWidget):
         for key, label in [
             ("user", "Authenticated user"),
             ("device", "Backend device"),
-            ("poll_interval", "Polling interval"),
             ("upload_interval", "Upload interval"),
             ("charge_percent", "Charge percent"),
             ("ac_connected", "AC connected"),
@@ -1004,9 +1005,6 @@ class StatusTab(QWidget):
 
         self.labels["user"].setText(auth_user.display_name if auth_user else "-")
         self.labels["device"].setText(binding.display_name if binding else "-")
-        self.labels["poll_interval"].setText(
-            self._interval(self.context.settings.poll_interval_ms)
-        )
         self.labels["upload_interval"].setText(
             self._interval(self.context.settings.upload_interval_ms)
         )
@@ -1095,7 +1093,12 @@ class StatusTab(QWidget):
     def _sync_role(value: str) -> str:
         if value in {"uploaded", "queued", "empty", "idle"}:
             return "success"
-        if value in {"uploading", "waiting for discharge", "waiting for AC confirmation"}:
+        if value in {
+            "uploading",
+            "waiting for discharge",
+            "waiting for change",
+            "waiting for AC confirmation",
+        }:
             return "warning"
         if value == "offline":
             return "danger"
@@ -1250,10 +1253,6 @@ class SettingsTab(QWidget):
         self.context = context
         self.api_base_url = QLineEdit(context.settings.api_base_url)
         self.api_base_url.setPlaceholderText("http://127.0.0.1:8000")
-        self.poll_interval = QSpinBox()
-        self.poll_interval.setRange(250, 60000)
-        self.poll_interval.setSuffix(" ms")
-        self.poll_interval.setValue(context.settings.poll_interval_ms)
         self.upload_interval = QSpinBox()
         self.upload_interval.setRange(1000, 300000)
         self.upload_interval.setSuffix(" ms")
@@ -1293,7 +1292,6 @@ class SettingsTab(QWidget):
         collection_box.setObjectName("Panel")
         collection_form = QFormLayout(collection_box)
         collection_form.setSpacing(12)
-        collection_form.addRow("Polling interval", self.poll_interval)
         collection_form.addRow("Upload interval", self.upload_interval)
         collection_form.addRow("Reference capacity", self.reference_capacity)
 
@@ -1341,10 +1339,6 @@ class SettingsTab(QWidget):
     def save(self) -> None:
         self.context.settings.api_base_url = self.api_base_url.text()
         self.context.settings.set_int(
-            SettingsService.POLL_INTERVAL_MS,
-            self.poll_interval.value(),
-        )
-        self.context.settings.set_int(
             SettingsService.UPLOAD_INTERVAL_MS,
             self.upload_interval.value(),
         )
@@ -1370,8 +1364,7 @@ class SettingsTab(QWidget):
         else:
             self.status_label.setText(
                 "Settings saved. "
-                f"Polling every {self.poll_interval.value()} ms, "
-                f"upload every {self.upload_interval.value()} ms."
+                f"Upload every {self.upload_interval.value()} ms."
             )
         self.settings_saved.emit()
 
@@ -1458,6 +1451,8 @@ class MainWindow(QMainWindow):
         self._backend_available = True
         self._server_error_grace_deadline: float | None = None
         self._health_check_in_progress = False
+        self._upload_again_after_current = False
+        self._pending_upload_callbacks: list[Callable[[], None]] = []
         self.tray_icon: QSystemTrayIcon | None = None
 
         self.stack = QStackedWidget()
@@ -1490,7 +1485,7 @@ class MainWindow(QMainWindow):
         self.binding_page.server_availability_changed.connect(
             self._set_backend_available
         )
-        self.shell_page.switch_device_requested.connect(self._show_binding)
+        self.shell_page.switch_device_requested.connect(self._switch_device)
         self.shell_page.logout_requested.connect(self._logout)
         self.shell_page.monitoring_toggle_requested.connect(self._toggle_monitoring)
         self.shell_page.settings_tab.settings_saved.connect(self._apply_timer_settings)
@@ -1531,6 +1526,33 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.binding_page)
         self.binding_page.refresh_devices()
 
+    def _switch_device(self) -> None:
+        if self.context.telemetry_manager.state.collection_running:
+            self.shell_page.set_monitoring_available(
+                False,
+                "Stopping monitoring and ending the active session before switching devices.",
+            )
+            self._complete_active_session(after_upload=self._show_binding_if_queue_empty)
+            return
+
+        self._show_binding_if_queue_empty()
+
+    def _show_binding_if_queue_empty(self) -> None:
+        self.context.telemetry_manager.refresh_queue_size()
+        queue_size = self.context.telemetry_manager.state.queue_size
+        if queue_size:
+            self.shell_page.set_monitoring_available(
+                self._backend_available or self._is_server_error_grace_active(),
+                (
+                    "Device switching is blocked until the current device's "
+                    f"{queue_size} pending sample(s) are uploaded."
+                ),
+            )
+            self.shell_page.refresh()
+            return
+
+        self._show_binding()
+
     def _show_shell(self) -> None:
         self.stack.setCurrentWidget(self.shell_page)
         if self._backend_available or self._is_server_error_grace_active():
@@ -1553,20 +1575,20 @@ class MainWindow(QMainWindow):
         self.shell_page.refresh()
 
     def _start_timers(self) -> None:
-        self.sample_timer.start(self.context.settings.poll_interval_ms)
+        self.sample_timer.start(SAMPLE_CHANGE_CHECK_INTERVAL_MS)
         self.upload_timer.start(self.context.settings.upload_interval_ms)
         self.refresh_timer.start(1000)
         self.logs_timer.start(5000)
 
     def _start_local_timers(self) -> None:
-        self.sample_timer.start(self.context.settings.poll_interval_ms)
+        self.sample_timer.start(SAMPLE_CHANGE_CHECK_INTERVAL_MS)
         self.refresh_timer.start(1000)
         self.logs_timer.start(5000)
 
     def _apply_timer_settings(self) -> None:
         if self.stack.currentWidget() == self.shell_page:
             if self.sample_timer.isActive():
-                self.sample_timer.start(self.context.settings.poll_interval_ms)
+                self.sample_timer.start(SAMPLE_CHANGE_CHECK_INTERVAL_MS)
             if self.upload_timer.isActive():
                 self.upload_timer.start(self.context.settings.upload_interval_ms)
 
@@ -1622,7 +1644,10 @@ class MainWindow(QMainWindow):
             manager.start()
             self.shell_page.refresh()
 
-    def _complete_active_session(self) -> None:
+    def _complete_active_session(
+        self,
+        after_upload: Callable[[], None] | None = None,
+    ) -> None:
         manager = self.context.telemetry_manager
         if manager.state.collection_running:
             self._stop_timers()
@@ -1632,10 +1657,20 @@ class MainWindow(QMainWindow):
         manager.collect_once(force_ac_only=True, allow_when_stopped=True)
         manager.collect_once(force_ac_only=True, allow_when_stopped=True)
         self.shell_page.refresh()
-        self._upload_tick()
+        self._upload_tick(after_finished=after_upload, ensure_next_upload=True)
 
-    def _upload_tick(self) -> None:
+    def _upload_tick(
+        self,
+        after_finished: Callable[[], None] | None = None,
+        *,
+        ensure_next_upload: bool = False,
+    ) -> None:
+        if after_finished is not None:
+            self._pending_upload_callbacks.append(after_finished)
+
         if self._upload_in_progress:
+            if ensure_next_upload:
+                self._upload_again_after_current = True
             return
 
         self._upload_in_progress = True
@@ -1791,6 +1826,15 @@ class MainWindow(QMainWindow):
 
     def _upload_finished(self) -> None:
         self._upload_in_progress = False
+        if self._upload_again_after_current:
+            self._upload_again_after_current = False
+            QTimer.singleShot(0, self._upload_tick)
+            return
+
+        pending_callbacks = self._pending_upload_callbacks
+        self._pending_upload_callbacks = []
+        for callback in pending_callbacks:
+            callback()
 
     def _health_tick(self) -> None:
         if (
@@ -1925,7 +1969,6 @@ class MainWindow(QMainWindow):
             self._ensure_tray_icon()
             if self.tray_icon is not None:
                 self.tray_icon.show()
-            self.context.telemetry_manager.stop()
             self.shell_page.refresh()
             event.ignore()
             self.hide()
