@@ -15,6 +15,7 @@ def main() -> int:
 
     application = QApplication(sys.argv)
     application.setApplicationName("Battery Monitoring Client")
+    application.setStyle("Fusion")
 
     context = AppContext()
     window = MainWindow(context)
