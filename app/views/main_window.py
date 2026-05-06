@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import monotonic
 from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
@@ -21,7 +22,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QMenu,
+    QScrollArea,
     QSpinBox,
+    QSizePolicy,
     QStackedWidget,
     QStyle,
     QSystemTrayIcon,
@@ -34,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from app.app_context import AppContext
 from app.models.device import DeviceSummary
+from app.models.telemetry import UploadResult
 from app.services.api_client import ApiError
 from app.services.settings_service import SettingsService
 from app.storage.secure_token_storage import TokenStorageError
@@ -240,6 +244,67 @@ QHeaderView::section {
     color: #334e68;
     font-weight: 700;
     padding: 8px;
+}
+
+QScrollArea#DetailsScroll {
+    background: transparent;
+    border: none;
+}
+
+QScrollArea#DetailsScroll > QWidget > QWidget {
+    background: transparent;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    border: none;
+    margin: 4px 2px 4px 4px;
+    width: 10px;
+}
+
+QScrollBar::handle:vertical {
+    background: #bcccdc;
+    border-radius: 5px;
+    min-height: 36px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #9fb3c8;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: transparent;
+    border: none;
+    height: 0;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    border: none;
+    height: 10px;
+    margin: 4px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #bcccdc;
+    border-radius: 5px;
+    min-width: 36px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #9fb3c8;
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    background: transparent;
+    border: none;
+    width: 0;
 }
 
 QProgressBar {
@@ -511,18 +576,22 @@ class LoginPage(QWidget):
 class DeviceBindingPage(QWidget):
     binding_completed = Signal()
     logout_requested = Signal()
+    server_availability_changed = Signal(bool, str)
 
     def __init__(self, context: AppContext) -> None:
         super().__init__()
         self.setObjectName("DeviceBindingPage")
         self.context = context
         self.devices: list[DeviceSummary] = []
+        self._device_selection_available = True
+        self._device_action_busy = False
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("SectionNote")
         self.status_label.setWordWrap(True)
         self.refresh_button = QPushButton("Refresh")
         self.use_selected_button = QPushButton("Use selected")
+        self.use_selected_button.setEnabled(False)
         self.logout_button = QPushButton("Logout")
         self.device_table = QTableWidget(0, 4)
         self.device_table.setHorizontalHeaderLabels(
@@ -537,6 +606,7 @@ class DeviceBindingPage(QWidget):
         self.reference_capacity.setRange(0, 300000)
         self.reference_capacity.setSuffix(" mWh")
         self.reference_capacity.setSpecialValueText("Unset")
+        self.reference_capacity.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.create_button = QPushButton("Create on first upload")
 
         existing_box = QGroupBox("Existing backend devices")
@@ -586,6 +656,7 @@ class DeviceBindingPage(QWidget):
         self.use_selected_button.clicked.connect(self._use_selected)
         self.create_button.clicked.connect(self._create_new)
         self.logout_button.clicked.connect(self.logout_requested.emit)
+        self.device_table.itemSelectionChanged.connect(self._update_device_actions)
 
     def refresh_devices(self) -> None:
         token = self.context.auth_service.current_token
@@ -594,19 +665,39 @@ class DeviceBindingPage(QWidget):
             return
 
         self.refresh_button.setEnabled(False)
+        self._set_device_action_busy(True)
         self.status_label.setText("Loading devices...")
         _run_background(
             self,
             lambda: self.context.device_binding_service.load_devices(token),
             self._devices_loaded,
-            lambda exc: self.status_label.setText(str(exc)),
-            lambda: self.refresh_button.setEnabled(True),
+            self._devices_failed,
+            lambda: self._set_device_action_busy(False),
         )
 
     def _devices_loaded(self, devices: list[DeviceSummary]) -> None:
         self.devices = devices
         self._populate_devices()
+        self._set_device_selection_available(True)
+        self.server_availability_changed.emit(True, "")
         self.status_label.setText(f"Loaded {len(self.devices)} device(s).")
+
+    def _devices_failed(self, exc: Exception) -> None:
+        if isinstance(exc, ApiError) and (
+            exc.status_code is None or exc.status_code >= 500
+        ):
+            self.devices = []
+            self._populate_devices()
+            message = (
+                "The backend is unavailable. Device selection is disabled "
+                "until refresh succeeds."
+            )
+            self._set_device_selection_available(False)
+            self.server_availability_changed.emit(False, message)
+            self.status_label.setText(f"{message} {exc}")
+            return
+
+        self.status_label.setText(str(exc))
 
     def _populate_devices(self) -> None:
         self.device_table.setRowCount(len(self.devices))
@@ -619,22 +710,116 @@ class DeviceBindingPage(QWidget):
             ]
             for column, value in enumerate(values):
                 self.device_table.setItem(row, column, QTableWidgetItem(value))
+        self._update_device_actions()
+
+    def _set_device_selection_available(self, available: bool) -> None:
+        self._device_selection_available = available
+        self.device_table.setEnabled(available)
+        self.new_device_name.setEnabled(available)
+        self.reference_capacity.setEnabled(available)
+        self._update_device_actions()
+
+    def _set_device_action_busy(self, busy: bool) -> None:
+        self._device_action_busy = busy
+        self.refresh_button.setEnabled(not busy)
+        self._update_device_actions()
+
+    def _update_device_actions(self) -> None:
+        has_selection = bool(self.device_table.selectionModel().selectedRows())
+        self.use_selected_button.setEnabled(
+            self._device_selection_available
+            and not self._device_action_busy
+            and has_selection
+        )
+        self.create_button.setEnabled(
+            self._device_selection_available and not self._device_action_busy
+        )
 
     def _use_selected(self) -> None:
+        if not self._device_selection_available:
+            self.status_label.setText("Device selection is temporarily unavailable.")
+            return
+
         selected_rows = self.device_table.selectionModel().selectedRows()
         if not selected_rows:
             self.status_label.setText("Select a device first.")
             return
 
         device = self.devices[selected_rows[0].row()]
+        self._check_backend_before_device_action(
+            lambda devices: self._bind_after_backend_check(device.device_id, devices)
+        )
+
+    def _create_new(self) -> None:
+        if not self._device_selection_available:
+            self.status_label.setText("Device creation is temporarily unavailable.")
+            return
+
+        device_name = self.new_device_name.text()
+        reference_capacity = self.reference_capacity.value() or None
+        self._check_backend_before_device_action(
+            lambda _devices: self._create_after_backend_check(
+                device_name,
+                reference_capacity,
+            )
+        )
+
+    def _check_backend_before_device_action(
+        self,
+        on_success: Callable[[list[DeviceSummary]], None],
+    ) -> None:
+        token = self.context.auth_service.current_token
+        if not token:
+            self.status_label.setText("Authentication is required.")
+            return
+
+        self._set_device_action_busy(True)
+        self.status_label.setText("Checking backend before selecting device...")
+        _run_background(
+            self,
+            lambda: self.context.device_binding_service.load_devices(token),
+            lambda devices: self._backend_check_loaded(devices, on_success),
+            self._devices_failed,
+            lambda: self._set_device_action_busy(False),
+        )
+
+    def _backend_check_loaded(
+        self,
+        devices: list[DeviceSummary],
+        on_success: Callable[[list[DeviceSummary]], None],
+    ) -> None:
+        self.devices = devices
+        self._populate_devices()
+        self._set_device_selection_available(True)
+        self.server_availability_changed.emit(True, "")
+        on_success(devices)
+
+    def _bind_after_backend_check(
+        self,
+        device_id: str,
+        devices: list[DeviceSummary],
+    ) -> None:
+        device = next(
+            (candidate for candidate in devices if candidate.device_id == device_id),
+            None,
+        )
+        if device is None:
+            self.status_label.setText(
+                "The selected device is no longer available. Select a device again."
+            )
+            return
+
         self.context.device_binding_service.bind_existing(device)
         self.binding_completed.emit()
 
-    def _create_new(self) -> None:
-        reference_capacity = self.reference_capacity.value() or None
+    def _create_after_backend_check(
+        self,
+        device_name: str,
+        reference_capacity: int | None,
+    ) -> None:
         try:
             self.context.device_binding_service.prepare_new_device(
-                self.new_device_name.text(),
+                device_name,
                 reference_capacity,
             )
         except ValueError as exc:
@@ -654,6 +839,9 @@ SYNC_STATE_LABELS = {
     "empty": "Queue empty",
 }
 
+SERVER_ERROR_LOCAL_RECORDING_GRACE_SECONDS = 90.0
+BACKEND_HEALTH_CHECK_INTERVAL_MS = 10 * 1000
+
 
 class StatusTab(QWidget):
     def __init__(self, context: AppContext) -> None:
@@ -662,8 +850,10 @@ class StatusTab(QWidget):
         self.context = context
         self.labels: dict[str, QLabel] = {}
         self.toggle_button = QPushButton("Start Monitoring")
-        self.upload_now_button = QPushButton("Upload Now")
-        self.complete_session_button = QPushButton("Complete Active Session")
+        self.monitoring_available = True
+        self.control_notice = QLabel("")
+        self.control_notice.setObjectName("SectionNote")
+        self.control_notice.setWordWrap(True)
 
         self.charge_value = QLabel("-")
         self.power_value = QLabel("-")
@@ -677,25 +867,38 @@ class StatusTab(QWidget):
         ]:
             value_label.setObjectName("MetricValue")
             value_label.setWordWrap(True)
+            value_label.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+            value_label.setFixedHeight(58)
+            value_label.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Fixed,
+            )
 
         self.charge_progress = QProgressBar()
         self.charge_progress.setRange(0, 100)
         self.charge_progress.setTextVisible(False)
 
         metrics = QGridLayout()
-        metrics.setHorizontalSpacing(14)
+        metrics.setHorizontalSpacing(10)
         metrics.setVerticalSpacing(14)
+        for column in range(5):
+            metrics.setColumnStretch(column, 1)
+        metrics.addWidget(self._action_card(self.toggle_button), 0, 0)
         metrics.addWidget(
             self._metric_card("Battery charge", self.charge_value, self.charge_progress),
             0,
-            0,
+            1,
         )
-        metrics.addWidget(self._metric_card("Power flow", self.power_value), 0, 1)
-        metrics.addWidget(self._metric_card("Sync state", self.sync_value), 0, 2)
-        metrics.addWidget(self._metric_card("Pending samples", self.queue_value), 0, 3)
+        metrics.addWidget(self._metric_card("Power flow", self.power_value), 0, 2)
+        metrics.addWidget(self._metric_card("Sync state", self.sync_value), 0, 3)
+        metrics.addWidget(self._metric_card("Pending samples", self.queue_value), 0, 4)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setSpacing(10)
         for key, label in [
             ("user", "Authenticated user"),
@@ -718,15 +921,21 @@ class StatusTab(QWidget):
             self.labels[key] = value
             form.addRow(label, value)
 
+        details_scroll = QScrollArea()
+        details_scroll.setObjectName("DetailsScroll")
+        details_scroll.setWidgetResizable(True)
+        details_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        details_scroll.setMinimumHeight(160)
+
+        details_content = QWidget()
+        details_content.setLayout(form)
+        details_scroll.setWidget(details_content)
+
         details_box = QGroupBox("Current details")
         details_box.setObjectName("Panel")
-        details_box.setLayout(form)
-
-        button_row = QHBoxLayout()
-        button_row.addWidget(self.toggle_button)
-        button_row.addWidget(self.upload_now_button)
-        button_row.addWidget(self.complete_session_button)
-        button_row.addStretch(1)
+        details_layout = QVBoxLayout(details_box)
+        details_layout.setContentsMargins(0, 4, 0, 0)
+        details_layout.addWidget(details_scroll)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -738,16 +947,16 @@ class StatusTab(QWidget):
             )
         )
         layout.addLayout(metrics)
-        layout.addLayout(button_row)
-        layout.addWidget(details_box)
-        layout.addStretch(1)
+        layout.addWidget(self.control_notice)
+        layout.addWidget(details_box, 1)
 
         _set_variant(self.toggle_button, "primary")
-        _set_variant(self.upload_now_button, "subtle")
-        _set_variant(self.complete_session_button, "subtle")
         _set_standard_icon(self.toggle_button, "SP_MediaPlay")
-        _set_standard_icon(self.upload_now_button, "SP_ArrowUp")
-        _set_standard_icon(self.complete_session_button, "SP_DialogApplyButton")
+
+    def set_monitoring_available(self, available: bool, message: str = "") -> None:
+        self.monitoring_available = available
+        self.control_notice.setText(message)
+        self.toggle_button.setEnabled(available)
 
     @staticmethod
     def _metric_card(
@@ -757,6 +966,12 @@ class StatusTab(QWidget):
     ) -> QFrame:
         card = QFrame()
         card.setObjectName("MetricCard")
+        card.setFixedHeight(132)
+        card.setMinimumWidth(118)
+        card.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
         layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(8)
@@ -769,6 +984,17 @@ class StatusTab(QWidget):
             layout.addWidget(extra_widget)
         layout.addStretch(1)
         return card
+
+    @staticmethod
+    def _action_card(button: QPushButton) -> QWidget:
+        button.setObjectName("MonitorToggle")
+        button.setFixedHeight(132)
+        button.setMinimumWidth(118)
+        button.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        return button
 
     def refresh(self) -> None:
         auth_user = self.context.auth_service.current_user
@@ -802,6 +1028,7 @@ class StatusTab(QWidget):
             self.toggle_button,
             "danger" if state.collection_running else "primary",
         )
+        self.toggle_button.setEnabled(self.monitoring_available)
 
     def _refresh_metrics(self, snapshot: dict[str, Any], state: Any) -> None:
         charge = snapshot.get("charge_percent")
@@ -1035,6 +1262,7 @@ class SettingsTab(QWidget):
         self.reference_capacity.setRange(0, 300000)
         self.reference_capacity.setSuffix(" mWh")
         self.reference_capacity.setSpecialValueText("Unset")
+        self.reference_capacity.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         binding = context.device_binding_service.get_binding()
         if binding and binding.reference_capacity_mwh:
             self.reference_capacity.setValue(binding.reference_capacity_mwh)
@@ -1149,10 +1377,9 @@ class SettingsTab(QWidget):
 
 
 class ShellPage(QWidget):
+    monitoring_toggle_requested = Signal()
     switch_device_requested = Signal()
     logout_requested = Signal()
-    upload_now_requested = Signal()
-    complete_session_requested = Signal()
 
     def __init__(self, context: AppContext) -> None:
         super().__init__()
@@ -1161,6 +1388,7 @@ class ShellPage(QWidget):
         self.status_tab = StatusTab(context)
         self.logs_tab = LogsTab(context)
         self.settings_tab = SettingsTab(context)
+        self.monitoring_available = True
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.status_tab, "Status")
@@ -1200,23 +1428,11 @@ class ShellPage(QWidget):
         layout.addWidget(self.tabs)
 
         self.status_tab.toggle_button.clicked.connect(self.toggle_monitoring)
-        self.status_tab.upload_now_button.clicked.connect(self.upload_now)
-        self.status_tab.complete_session_button.clicked.connect(
-            self.complete_session_requested.emit
-        )
         self.settings_tab.switch_device_requested.connect(self.switch_device_requested.emit)
         self.settings_tab.logout_requested.connect(self.logout_requested.emit)
 
     def toggle_monitoring(self) -> None:
-        manager = self.context.telemetry_manager
-        if manager.state.collection_running:
-            manager.stop()
-        else:
-            manager.start()
-        self.refresh()
-
-    def upload_now(self) -> None:
-        self.upload_now_requested.emit()
+        self.monitoring_toggle_requested.emit()
 
     def refresh(self) -> None:
         self.context.telemetry_manager.refresh_queue_size()
@@ -1225,16 +1441,23 @@ class ShellPage(QWidget):
     def refresh_logs(self) -> None:
         self.logs_tab.refresh()
 
+    def set_monitoring_available(self, available: bool, message: str = "") -> None:
+        self.monitoring_available = available
+        self.status_tab.set_monitoring_available(available, message)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, context: AppContext) -> None:
         super().__init__()
         self.context = context
         self.setWindowTitle("Battery Monitoring Client")
-        self.setMinimumSize(980, 680)
+        self.setMinimumSize(700, 500)
         self.setStyleSheet(APP_STYLESHEET)
         self._allow_close = False
         self._upload_in_progress = False
+        self._backend_available = True
+        self._server_error_grace_deadline: float | None = None
+        self._health_check_in_progress = False
         self.tray_icon: QSystemTrayIcon | None = None
 
         self.stack = QStackedWidget()
@@ -1250,18 +1473,26 @@ class MainWindow(QMainWindow):
         self.upload_timer = QTimer(self)
         self.refresh_timer = QTimer(self)
         self.logs_timer = QTimer(self)
+        self.health_timer = QTimer(self)
+        self.server_error_grace_timer = QTimer(self)
         self.sample_timer.timeout.connect(self._sample_tick)
         self.upload_timer.timeout.connect(self._upload_tick)
         self.refresh_timer.timeout.connect(self.shell_page.refresh)
         self.logs_timer.timeout.connect(self.shell_page.refresh_logs)
+        self.health_timer.setInterval(BACKEND_HEALTH_CHECK_INTERVAL_MS)
+        self.health_timer.timeout.connect(self._health_tick)
+        self.server_error_grace_timer.setSingleShot(True)
+        self.server_error_grace_timer.timeout.connect(self._server_error_grace_expired)
 
         self.login_page.logged_in.connect(self._after_authentication)
         self.binding_page.binding_completed.connect(self._show_shell)
         self.binding_page.logout_requested.connect(self._logout)
+        self.binding_page.server_availability_changed.connect(
+            self._set_backend_available
+        )
         self.shell_page.switch_device_requested.connect(self._show_binding)
         self.shell_page.logout_requested.connect(self._logout)
-        self.shell_page.upload_now_requested.connect(self._upload_tick)
-        self.shell_page.complete_session_requested.connect(self._complete_active_session)
+        self.shell_page.monitoring_toggle_requested.connect(self._toggle_monitoring)
         self.shell_page.settings_tab.settings_saved.connect(self._apply_timer_settings)
 
         self.stack.setCurrentWidget(self.login_page)
@@ -1302,13 +1533,33 @@ class MainWindow(QMainWindow):
 
     def _show_shell(self) -> None:
         self.stack.setCurrentWidget(self.shell_page)
-        self._start_timers()
-        self.context.telemetry_manager.start()
+        if self._backend_available or self._is_server_error_grace_active():
+            if self._backend_available:
+                self._start_timers()
+            else:
+                self._start_local_timers()
+            self.context.telemetry_manager.start()
+            self.shell_page.set_monitoring_available(
+                True,
+                "" if self._backend_available else self._offline_grace_notice(),
+            )
+        else:
+            self._stop_timers()
+            self.context.telemetry_manager.stop()
+            self.shell_page.set_monitoring_available(
+                False,
+                "Monitoring is unavailable until the backend server responds.",
+            )
         self.shell_page.refresh()
 
     def _start_timers(self) -> None:
         self.sample_timer.start(self.context.settings.poll_interval_ms)
         self.upload_timer.start(self.context.settings.upload_interval_ms)
+        self.refresh_timer.start(1000)
+        self.logs_timer.start(5000)
+
+    def _start_local_timers(self) -> None:
+        self.sample_timer.start(self.context.settings.poll_interval_ms)
         self.refresh_timer.start(1000)
         self.logs_timer.start(5000)
 
@@ -1332,8 +1583,11 @@ class MainWindow(QMainWindow):
 
     def _shutdown_runtime(self) -> None:
         self._stop_timers()
+        self.health_timer.stop()
+        self.server_error_grace_timer.stop()
         self.context.telemetry_manager.stop()
         self._upload_in_progress = False
+        self._health_check_in_progress = False
         QThreadPool.globalInstance().clear()
         if self.tray_icon is not None:
             self.tray_icon.hide()
@@ -1342,11 +1596,41 @@ class MainWindow(QMainWindow):
         self.context.telemetry_manager.collect_once()
         self.shell_page.refresh()
 
+    def _toggle_monitoring(self) -> None:
+        if not self.shell_page.monitoring_available:
+            self.shell_page.set_monitoring_available(
+                False,
+                "Monitoring is unavailable until the backend server responds.",
+            )
+            return
+
+        manager = self.context.telemetry_manager
+        if manager.state.collection_running:
+            self._complete_active_session()
+        else:
+            if self._backend_available:
+                self._start_timers()
+            elif self._is_server_error_grace_active():
+                self._start_local_timers()
+            else:
+                self.shell_page.set_monitoring_available(
+                    False,
+                    "Monitoring is unavailable until the backend server responds.",
+                )
+                self.shell_page.refresh()
+                return
+            manager.start()
+            self.shell_page.refresh()
+
     def _complete_active_session(self) -> None:
-        self.context.telemetry_manager.start()
-        self.context.telemetry_manager.request_ac_completion_confirmation()
-        self.context.telemetry_manager.collect_once(force_ac_only=True)
-        self.context.telemetry_manager.collect_once(force_ac_only=True)
+        manager = self.context.telemetry_manager
+        if manager.state.collection_running:
+            self._stop_timers()
+            manager.stop()
+
+        manager.request_ac_completion_confirmation()
+        manager.collect_once(force_ac_only=True, allow_when_stopped=True)
+        manager.collect_once(force_ac_only=True, allow_when_stopped=True)
         self.shell_page.refresh()
         self._upload_tick()
 
@@ -1360,10 +1644,144 @@ class MainWindow(QMainWindow):
         _run_background(
             self,
             self.context.telemetry_manager.upload_once,
-            lambda _result: self.shell_page.refresh(),
+            self._upload_succeeded,
             self._upload_failed,
             self._upload_finished,
         )
+
+    def _upload_succeeded(self, result: UploadResult | None) -> None:
+        if result is None:
+            self.shell_page.refresh()
+            return
+
+        status_code = result.status_code
+        if status_code is not None and 400 <= status_code < 500:
+            self._handle_client_upload_error(result)
+            return
+        if result.backend_unavailable:
+            self._handle_server_upload_error(result)
+            return
+
+        if result.successful:
+            self._clear_server_error_grace()
+            if self._backend_available is False:
+                self._set_backend_available(True, "")
+        self.shell_page.refresh()
+
+    def _handle_client_upload_error(self, result: UploadResult) -> None:
+        message = (
+            result.error
+            or "The backend rejected the selected device. Choose a device again."
+        )
+        self.context.telemetry_manager.state.sync_state = "setup required"
+        self.context.telemetry_manager.state.last_error = message
+        self.context.telemetry_manager.stop()
+        self.context.device_binding_service.clear_binding()
+        self._set_backend_available(True, "")
+        self._show_binding()
+
+    def _handle_server_upload_error(self, result: UploadResult) -> None:
+        status_code = result.status_code or 500
+        message = (
+            result.error
+            or self._backend_unavailable_title(result)
+        )
+        if self._should_keep_recording_after_server_error():
+            self._start_server_error_grace(status_code, message)
+            return
+
+        self._stop_recording_after_server_errors(status_code, message)
+
+    @staticmethod
+    def _backend_unavailable_title(result: UploadResult) -> str:
+        if result.status_code is None:
+            return "Backend is unavailable."
+        return f"Backend server error ({result.status_code})."
+
+    def _should_keep_recording_after_server_error(self) -> bool:
+        manager = self.context.telemetry_manager
+        if not manager.state.collection_running:
+            return False
+
+        return (
+            self._server_error_grace_deadline is None
+            or not self._is_server_error_grace_active()
+        )
+
+    def _start_server_error_grace(self, status_code: int, message: str) -> None:
+        self._server_error_grace_deadline = (
+            monotonic() + SERVER_ERROR_LOCAL_RECORDING_GRACE_SECONDS
+        )
+        self.server_error_grace_timer.start(
+            int(SERVER_ERROR_LOCAL_RECORDING_GRACE_SECONDS * 1000)
+        )
+        notice = self._offline_grace_notice(status_code)
+        self.context.telemetry_manager.state.sync_state = "offline"
+        self.context.telemetry_manager.state.last_error = message
+        self.upload_timer.stop()
+        self._start_local_timers()
+        self.context.telemetry_manager.start()
+        self._set_backend_available(
+            False,
+            notice,
+            stop_monitoring=False,
+            monitoring_available=True,
+        )
+        self.shell_page.refresh()
+
+    def _stop_recording_after_server_errors(self, status_code: int, message: str) -> None:
+        notice = (
+            f"{self._server_error_label(status_code)} Repeated during the 90-second "
+            "local recording window. Monitoring is stopped until the server responds."
+        )
+        self.context.telemetry_manager.state.sync_state = "offline"
+        self.context.telemetry_manager.state.last_error = message
+        self._server_error_grace_deadline = None
+        self.server_error_grace_timer.stop()
+        self._set_backend_available(False, notice)
+        self._stop_timers()
+        self.context.telemetry_manager.stop()
+        self.shell_page.refresh()
+
+    def _clear_server_error_grace(self) -> None:
+        self._server_error_grace_deadline = None
+        self.server_error_grace_timer.stop()
+        self.shell_page.set_monitoring_available(True, "")
+
+    def _server_error_grace_expired(self) -> None:
+        if self._backend_available:
+            self._clear_server_error_grace()
+            return
+
+        message = (
+            self.context.telemetry_manager.state.last_error
+            or "Backend is unavailable."
+        )
+        self._stop_recording_after_server_errors(500, message)
+
+    def _is_server_error_grace_active(self) -> bool:
+        return (
+            self._server_error_grace_deadline is not None
+            and monotonic() < self._server_error_grace_deadline
+        )
+
+    def _offline_grace_notice(self, status_code: int | None = None) -> str:
+        label = (
+            "Backend is unavailable."
+            if status_code is None
+            else self._server_error_label(status_code)
+        )
+        return (
+            f"{label} Local recording will continue for 90 seconds; another "
+            "server error during this window will stop it. Health is checked "
+            "every 10 seconds."
+        )
+
+    @staticmethod
+    def _server_error_label(status_code: int) -> str:
+        if status_code == 500:
+            return "Backend is unavailable."
+        return f"Backend server error ({status_code})."
 
     def _upload_failed(self, exc: Exception) -> None:
         self.context.telemetry_manager.state.sync_state = "offline"
@@ -1374,8 +1792,83 @@ class MainWindow(QMainWindow):
     def _upload_finished(self) -> None:
         self._upload_in_progress = False
 
+    def _health_tick(self) -> None:
+        if (
+            (self._backend_available and not self._is_server_error_grace_active())
+            or self._health_check_in_progress
+        ):
+            return
+
+        self._health_check_in_progress = True
+        _run_background(
+            self,
+            self.context.api_client.health_check,
+            self._health_check_succeeded,
+            self._health_check_failed,
+            self._health_check_finished,
+        )
+
+    def _health_check_succeeded(self, _result: dict[str, Any]) -> None:
+        self._set_backend_available(True, "")
+        if self.stack.currentWidget() == self.binding_page:
+            self.binding_page.refresh_devices()
+        else:
+            self._restart_monitoring_after_backend_recovery()
+            self.shell_page.refresh()
+
+    def _restart_monitoring_after_backend_recovery(self) -> None:
+        if self.context.device_binding_service.get_binding() is None:
+            return
+
+        self._start_timers()
+        self.context.telemetry_manager.start()
+        self.shell_page.set_monitoring_available(True, "")
+
+    def _health_check_failed(self, exc: Exception) -> None:
+        if self._is_server_error_grace_active():
+            message = f"{self._offline_grace_notice()} Last health check failed: {exc}"
+            self.shell_page.set_monitoring_available(True, message)
+        else:
+            message = (
+                "Backend is still unavailable. Monitoring and device selection remain "
+                f"locked. {exc}"
+            )
+            self.shell_page.set_monitoring_available(False, message)
+        if self.stack.currentWidget() == self.binding_page:
+            self.binding_page.status_label.setText(message)
+
+    def _health_check_finished(self) -> None:
+        self._health_check_in_progress = False
+
+    def _set_backend_available(
+        self,
+        available: bool,
+        message: str = "",
+        *,
+        stop_monitoring: bool = True,
+        monitoring_available: bool | None = None,
+    ) -> None:
+        self._backend_available = available
+        if available:
+            self._server_error_grace_deadline = None
+            self.server_error_grace_timer.stop()
+            self.health_timer.stop()
+        elif not self.health_timer.isActive():
+            self.health_timer.start()
+            QTimer.singleShot(0, self._health_tick)
+        controls_available = available if monitoring_available is None else monitoring_available
+        self.shell_page.set_monitoring_available(controls_available, message)
+        self.binding_page._set_device_selection_available(available)
+        if message and self.stack.currentWidget() == self.binding_page:
+            self.binding_page.status_label.setText(message)
+        if not available and stop_monitoring:
+            self.context.telemetry_manager.stop()
+
     def _logout(self) -> None:
         self._stop_timers()
+        self.health_timer.stop()
+        self.server_error_grace_timer.stop()
+        self._health_check_in_progress = False
         self.context.telemetry_manager.stop()
         try:
             self.context.auth_service.logout()
@@ -1397,7 +1890,7 @@ class MainWindow(QMainWindow):
         toggle_action = QAction("Start/Stop Monitoring", self)
         quit_action = QAction("Quit", self)
         show_action.triggered.connect(self._restore_from_tray)
-        toggle_action.triggered.connect(self.shell_page.toggle_monitoring)
+        toggle_action.triggered.connect(self._toggle_monitoring)
         quit_action.triggered.connect(self._quit_from_tray)
         menu.addAction(show_action)
         menu.addAction(toggle_action)

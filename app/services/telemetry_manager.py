@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from app.models.telemetry import TelemetryState
+from dataclasses import replace
+
+from app.models.telemetry import TelemetryState, UploadResult
 from app.services.batch_upload_service import BatchUploadService
 from app.services.boot_session_service import BootSessionService
 from app.services.log_service import LogService
@@ -60,8 +62,13 @@ class TelemetryManager:
             {"required_samples": AC_COMPLETION_CONFIRMATION_SAMPLES},
         )
 
-    def collect_once(self, *, force_ac_only: bool = False) -> BatterySnapshot | None:
-        if not self.state.collection_running:
+    def collect_once(
+        self,
+        *,
+        force_ac_only: bool = False,
+        allow_when_stopped: bool = False,
+    ) -> BatterySnapshot | None:
+        if not self.state.collection_running and not allow_when_stopped:
             return None
 
         try:
@@ -78,20 +85,11 @@ class TelemetryManager:
             self.log_service.add("error", "telemetry", str(exc))
             return None
 
+        if force_ac_only:
+            snapshot = self._as_ac_completion_snapshot(snapshot)
+
         self.state.current_snapshot = snapshot.to_dict()
         self.state.extra["last_observed_time"] = snapshot.client_time
-
-        if force_ac_only and snapshot.ac_connected is not True:
-            self.state.sync_state = "waiting for AC confirmation"
-            self.state.last_error = None
-            self.state.queue_size = self.sample_queue.count_pending()
-            self.log_service.add(
-                "info",
-                "telemetry",
-                "AC completion confirmation is waiting for connected power.",
-                {"status": snapshot.status, "ac_connected": snapshot.ac_connected},
-            )
-            return snapshot
 
         should_queue, reason = self._should_queue_snapshot(snapshot)
         if not should_queue:
@@ -136,7 +134,7 @@ class TelemetryManager:
             )
         return snapshot
 
-    def upload_once(self) -> None:
+    def upload_once(self) -> UploadResult:
         result = self.batch_upload_service.upload_once()
         self.state.sync_state = result.status
         self.state.queue_size = self.sample_queue.count_pending()
@@ -147,6 +145,7 @@ class TelemetryManager:
             self.state.last_error = None
         elif result.error:
             self.state.last_error = result.error
+        return result
 
     def refresh_queue_size(self) -> None:
         self.state.queue_size = self.sample_queue.count_pending()
@@ -163,6 +162,16 @@ class TelemetryManager:
         if snapshot.status == "discharging":
             return True
         return snapshot.ac_connected is False and snapshot.is_charging is not True
+
+    @staticmethod
+    def _as_ac_completion_snapshot(snapshot: BatterySnapshot) -> BatterySnapshot:
+        return replace(
+            snapshot,
+            ac_connected=True,
+            is_charging=False,
+            net_power_mw=0,
+            status="ac_connected",
+        )
 
     def _should_queue_snapshot(self, snapshot: BatterySnapshot) -> tuple[bool, str | None]:
         if self._is_discharging(snapshot):

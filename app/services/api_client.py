@@ -64,6 +64,14 @@ class ApiClient:
         except ValueError as exc:
             raise ApiError("Backend returned a non-JSON response.", response.status_code) from exc
 
+    def health_check(self) -> dict[str, Any]:
+        data = self.request("GET", "/health")
+        if not isinstance(data, dict):
+            raise ApiError("Health check response has an unexpected format.")
+        if str(data.get("status") or "").lower() != "healthy":
+            raise ApiError("Backend health check did not report healthy status.")
+        return data
+
     @staticmethod
     def _error_message(response) -> str:
         try:

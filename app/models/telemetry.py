@@ -26,6 +26,8 @@ class UploadResult:
     status: str
     sample_count: int = 0
     processed_samples: int = 0
+    status_code: int | None = None
+    backend_unavailable: bool = False
     error: str | None = None
     response: dict[str, Any] | None = None
 

@@ -69,7 +69,15 @@ class BatchUploadService:
                 request_body=request_body,
                 error=str(exc),
             )
-            return UploadResult(status="retrying", sample_count=len(samples), error=str(exc))
+            return UploadResult(
+                status="retrying",
+                sample_count=len(samples),
+                status_code=exc.status_code,
+                backend_unavailable=(
+                    exc.status_code is None or exc.status_code >= 500
+                ),
+                error=str(exc),
+            )
 
         if not isinstance(response, dict):
             error = "Batch upload response has an unexpected format."
