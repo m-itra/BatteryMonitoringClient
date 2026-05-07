@@ -16,6 +16,7 @@ class SettingsService:
     API_BASE_URL = "api_base_url"
     SELECTED_DEVICE_ID = "selected_device_id"
     SELECTED_DEVICE_NAME = "selected_device_name"
+    SELECTED_DEVICE_USER_KEY = "selected_device_user_key"
     REFERENCE_CAPACITY_MWH = "reference_capacity_mwh"
     BOOT_SIGNATURE = "boot_signature"
     BOOT_SESSION_ID = "boot_session_id"

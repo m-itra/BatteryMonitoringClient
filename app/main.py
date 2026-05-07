@@ -19,7 +19,7 @@ def main() -> int:
 
     context = AppContext()
     window = MainWindow(context)
-    window.resize(1080, 720)
+    window.resize(880, 680)
     window.show()
     return int(application.exec())
 

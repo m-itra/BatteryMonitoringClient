@@ -41,6 +41,7 @@ from app.models.device import DeviceSummary
 from app.models.telemetry import UploadResult
 from app.services.api_client import ApiError
 from app.services.settings_service import SettingsService
+from app.services.telemetry_manager import BATTERY_CHANGE_NOTICE_KEY
 from app.storage.secure_token_storage import TokenStorageError
 
 
@@ -202,6 +203,12 @@ QPushButton[variant="danger-outline"]:hover {
 QPushButton[variant="subtle"] {
     background: #eef4f7;
     border-color: #d9e2ec;
+}
+
+QPushButton[variant="subtle"]:hover {
+    background: #ddebf0;
+    border-color: #9fb3c8;
+    color: #102a43;
 }
 
 QTabWidget::pane {
@@ -467,9 +474,15 @@ class LoginPage(QWidget):
         self.email_input = QLineEdit()
         self.email_input.setPlaceholderText("name@example.com")
         self.password_input = QLineEdit()
-        self.password_input.setPlaceholderText("Password")
+        self.password_input.setPlaceholderText("Пароль")
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.login_button = QPushButton("Sign in")
+        for input_field in [
+            self.api_base_url_input,
+            self.email_input,
+            self.password_input,
+        ]:
+            input_field.setMinimumHeight(38)
+        self.login_button = QPushButton("Войти")
         self.status_label = QLabel("")
         self.status_label.setObjectName("SectionNote")
         self.status_label.setWordWrap(True)
@@ -478,9 +491,9 @@ class LoginPage(QWidget):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
         form.setSpacing(12)
-        form.addRow("Server URL", self.api_base_url_input)
-        form.addRow("Email address", self.email_input)
-        form.addRow("Password", self.password_input)
+        form.addRow("URL сервера", self.api_base_url_input)
+        form.addRow("Эл. почта", self.email_input)
+        form.addRow("Пароль", self.password_input)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 28, 28, 28)
@@ -500,9 +513,11 @@ class LoginPage(QWidget):
             "font-size: 17px; font-weight: 800;"
         )
 
-        title = QLabel("Battery Monitoring Client")
+        title = QLabel("Мониторинг батареи")
         title.setObjectName("PageTitle")
-        subtitle = QLabel("Connect to the backend to collect and sync battery telemetry.")
+        subtitle = QLabel(
+            "Подключитесь к серверу, чтобы собирать и синхронизировать данные батареи."
+        )
         subtitle.setObjectName("PageSubtitle")
         subtitle.setWordWrap(True)
 
@@ -527,7 +542,7 @@ class LoginPage(QWidget):
         self.status_label.setText(message)
 
     def _login(self) -> None:
-        self._submit_auth("Signing in...", self.context.auth_service.login)
+        self._submit_auth("Вход...", self.context.auth_service.login)
 
     def _submit_auth(
         self,
@@ -538,7 +553,7 @@ class LoginPage(QWidget):
         email = self.email_input.text().strip()
         password = self.password_input.text()
         if not email or not password:
-            self.status_label.setText("Email and password are required.")
+            self.status_label.setText("Укажите email и пароль.")
             return
 
         self._set_busy(True)
@@ -581,27 +596,28 @@ class DeviceBindingPage(QWidget):
         self.status_label = QLabel("")
         self.status_label.setObjectName("SectionNote")
         self.status_label.setWordWrap(True)
-        self.refresh_button = QPushButton("Refresh")
-        self.use_selected_button = QPushButton("Use selected")
+        self.refresh_button = QPushButton("Обновить")
+        self.use_selected_button = QPushButton("Выбрать")
         self.use_selected_button.setEnabled(False)
-        self.logout_button = QPushButton("Logout")
+        self.logout_button = QPushButton("Выйти")
         self.device_table = QTableWidget(0, 4)
         self.device_table.setHorizontalHeaderLabels(
-            ["Device Name", "Last Seen", "Created", "Device ID"]
+            ["Имя устройства", "Последний раз", "Создано", "ID устройства"]
         )
         _configure_table(self.device_table)
         self.device_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
 
         self.new_device_name = QLineEdit()
-        self.new_device_name.setPlaceholderText("This computer")
+        self.new_device_name.setPlaceholderText("Этот компьютер")
         self.reference_capacity = QSpinBox()
-        self.reference_capacity.setRange(0, 300000)
-        self.reference_capacity.setSuffix(" mWh")
-        self.reference_capacity.setSpecialValueText("Unset")
+        self.reference_capacity.setRange(-300000, 300000)
+        self.reference_capacity.setSuffix(" мВт·ч")
+        self.reference_capacity.setValue(0)
         self.reference_capacity.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-        self.create_button = QPushButton("Create on first upload")
+        self.reference_capacity.setToolTip("0 означает использовать системную емкость.")
+        self.create_button = QPushButton("Создать при первой отправке")
 
-        existing_box = QGroupBox("Existing backend devices")
+        existing_box = QGroupBox("Устройства на сервере")
         existing_box.setObjectName("Panel")
         existing_layout = QVBoxLayout(existing_box)
         existing_layout.setSpacing(12)
@@ -612,12 +628,12 @@ class DeviceBindingPage(QWidget):
         existing_layout.addLayout(button_row)
         existing_layout.addWidget(self.device_table)
 
-        new_box = QGroupBox("New backend device")
+        new_box = QGroupBox("Новое устройство")
         new_box.setObjectName("Panel")
         new_layout = QFormLayout(new_box)
         new_layout.setSpacing(12)
-        new_layout.addRow("Device name", self.new_device_name)
-        new_layout.addRow("Reference capacity", self.reference_capacity)
+        new_layout.addRow("Имя устройства", self.new_device_name)
+        new_layout.addRow("Эталонная емкость", self.reference_capacity)
         new_layout.addRow(self.create_button)
 
         layout = QVBoxLayout(self)
@@ -626,8 +642,8 @@ class DeviceBindingPage(QWidget):
         header_row = QHBoxLayout()
         header_row.addWidget(
             _page_header(
-                "Connect this computer",
-                "Choose a device record from the backend or prepare a new one.",
+                "Подключение компьютера",
+                "Выберите устройство на сервере или подготовьте новое.",
             )
         )
         header_row.addStretch(1)
@@ -653,12 +669,12 @@ class DeviceBindingPage(QWidget):
     def refresh_devices(self) -> None:
         token = self.context.auth_service.current_token
         if not token:
-            self.status_label.setText("Authentication is required.")
+            self.status_label.setText("Требуется авторизация.")
             return
 
         self.refresh_button.setEnabled(False)
         self._set_device_action_busy(True)
-        self.status_label.setText("Loading devices...")
+        self.status_label.setText("Загрузка устройств...")
         _run_background(
             self,
             lambda: self.context.device_binding_service.load_devices(token),
@@ -672,7 +688,7 @@ class DeviceBindingPage(QWidget):
         self._populate_devices()
         self._set_device_selection_available(True)
         self.server_availability_changed.emit(True, "")
-        self.status_label.setText(f"Loaded {len(self.devices)} device(s).")
+        self.status_label.setText(f"Загружено устройств: {len(self.devices)}.")
 
     def _devices_failed(self, exc: Exception) -> None:
         if isinstance(exc, ApiError) and (
@@ -681,8 +697,8 @@ class DeviceBindingPage(QWidget):
             self.devices = []
             self._populate_devices()
             message = (
-                "The backend is unavailable. Device selection is disabled "
-                "until refresh succeeds."
+                "Сервер недоступен. Выбор устройства отключен "
+                "до успешного обновления."
             )
             self._set_device_selection_available(False)
             self.server_availability_changed.emit(False, message)
@@ -729,12 +745,12 @@ class DeviceBindingPage(QWidget):
 
     def _use_selected(self) -> None:
         if not self._device_selection_available:
-            self.status_label.setText("Device selection is temporarily unavailable.")
+            self.status_label.setText("Выбор устройства временно недоступен.")
             return
 
         selected_rows = self.device_table.selectionModel().selectedRows()
         if not selected_rows:
-            self.status_label.setText("Select a device first.")
+            self.status_label.setText("Сначала выберите устройство.")
             return
 
         device = self.devices[selected_rows[0].row()]
@@ -744,11 +760,11 @@ class DeviceBindingPage(QWidget):
 
     def _create_new(self) -> None:
         if not self._device_selection_available:
-            self.status_label.setText("Device creation is temporarily unavailable.")
+            self.status_label.setText("Создание устройства временно недоступно.")
             return
 
         device_name = self.new_device_name.text()
-        reference_capacity = self.reference_capacity.value() or None
+        reference_capacity = self.reference_capacity.value()
         self._check_backend_before_device_action(
             lambda _devices: self._create_after_backend_check(
                 device_name,
@@ -762,11 +778,11 @@ class DeviceBindingPage(QWidget):
     ) -> None:
         token = self.context.auth_service.current_token
         if not token:
-            self.status_label.setText("Authentication is required.")
+            self.status_label.setText("Требуется авторизация.")
             return
 
         self._set_device_action_busy(True)
-        self.status_label.setText("Checking backend before selecting device...")
+        self.status_label.setText("Проверка сервера перед выбором устройства...")
         _run_background(
             self,
             lambda: self.context.device_binding_service.load_devices(token),
@@ -797,7 +813,7 @@ class DeviceBindingPage(QWidget):
         )
         if device is None:
             self.status_label.setText(
-                "The selected device is no longer available. Select a device again."
+                "Выбранное устройство больше недоступно. Выберите устройство снова."
             )
             return
 
@@ -807,7 +823,7 @@ class DeviceBindingPage(QWidget):
     def _create_after_backend_check(
         self,
         device_name: str,
-        reference_capacity: int | None,
+        reference_capacity: int,
     ) -> None:
         try:
             self.context.device_binding_service.prepare_new_device(
@@ -821,15 +837,19 @@ class DeviceBindingPage(QWidget):
 
 
 SYNC_STATE_LABELS = {
-    "idle": "Idle",
-    "queued": "Queued",
-    "uploading": "Uploading",
-    "offline": "Offline",
-    "waiting for discharge": "Waiting for discharge",
-    "waiting for change": "Waiting for change",
-    "waiting for AC confirmation": "Waiting for AC confirmation",
-    "uploaded": "Uploaded",
-    "empty": "Queue empty",
+    "idle": "Ожидание",
+    "online": "Онлайн",
+    "queued": "В очереди",
+    "uploading": "Отправка",
+    "retrying": "Повторная попытка",
+    "offline": "Офлайн",
+    "auth error": "Ошибка авторизации",
+    "setup required": "Требуется настройка",
+    "waiting for discharge": "Ожидание разряда",
+    "waiting for change": "Ожидание изменений",
+    "waiting for AC confirmation": "Подтверждение сети",
+    "uploaded": "Отправлено",
+    "empty": "Очередь пуста",
 }
 
 SERVER_ERROR_LOCAL_RECORDING_GRACE_SECONDS = 90.0
@@ -842,11 +862,15 @@ class StatusTab(QWidget):
         self.setObjectName("StatusTab")
         self.context = context
         self.labels: dict[str, QLabel] = {}
-        self.toggle_button = QPushButton("Start Monitoring")
+        self.toggle_button = QPushButton("Начать\nмониторинг")
         self.monitoring_available = True
         self.control_notice = QLabel("")
         self.control_notice.setObjectName("SectionNote")
         self.control_notice.setWordWrap(True)
+        self.battery_notice = QLabel("")
+        self.battery_notice.setObjectName("SectionNote")
+        self.battery_notice.setWordWrap(True)
+        self.battery_notice.setVisible(False)
 
         self.charge_value = QLabel("-")
         self.power_value = QLabel("-")
@@ -880,13 +904,13 @@ class StatusTab(QWidget):
             metrics.setColumnStretch(column, 1)
         metrics.addWidget(self._action_card(self.toggle_button), 0, 0)
         metrics.addWidget(
-            self._metric_card("Battery charge", self.charge_value, self.charge_progress),
+            self._metric_card("Заряд батареи", self.charge_value, self.charge_progress),
             0,
             1,
         )
-        metrics.addWidget(self._metric_card("Power flow", self.power_value), 0, 2)
-        metrics.addWidget(self._metric_card("Sync state", self.sync_value), 0, 3)
-        metrics.addWidget(self._metric_card("Pending samples", self.queue_value), 0, 4)
+        metrics.addWidget(self._metric_card("Питание", self.power_value), 0, 2)
+        metrics.addWidget(self._metric_card("Синхронизация", self.sync_value), 0, 3)
+        metrics.addWidget(self._metric_card("В очереди", self.queue_value), 0, 4)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -894,18 +918,18 @@ class StatusTab(QWidget):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setSpacing(10)
         for key, label in [
-            ("user", "Authenticated user"),
-            ("device", "Backend device"),
-            ("upload_interval", "Upload interval"),
-            ("charge_percent", "Charge percent"),
-            ("ac_connected", "AC connected"),
-            ("is_charging", "Charging"),
-            ("net_power_mw", "Current power"),
-            ("last_sample", "Last local sample"),
-            ("last_upload", "Last successful upload"),
-            ("sync_state", "Sync state"),
-            ("queue_size", "Unsent queue size"),
-            ("last_error", "Last error"),
+            ("user", "Пользователь"),
+            ("device", "Устройство"),
+            ("upload_interval", "Интервал отправки"),
+            ("charge_percent", "Заряд"),
+            ("ac_connected", "Питание от сети"),
+            ("is_charging", "Заряжается"),
+            ("net_power_mw", "Текущая мощность"),
+            ("last_sample", "Последняя локальная запись"),
+            ("last_upload", "Последняя успешная отправка"),
+            ("sync_state", "Синхронизация"),
+            ("queue_size", "Неотправлено"),
+            ("last_error", "Последняя ошибка"),
         ]:
             value = QLabel("-")
             value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -923,7 +947,7 @@ class StatusTab(QWidget):
         details_content.setLayout(form)
         details_scroll.setWidget(details_content)
 
-        details_box = QGroupBox("Current details")
+        details_box = QGroupBox("Текущие данные")
         details_box.setObjectName("Panel")
         details_layout = QVBoxLayout(details_box)
         details_layout.setContentsMargins(0, 4, 0, 0)
@@ -934,12 +958,13 @@ class StatusTab(QWidget):
         layout.setSpacing(16)
         layout.addWidget(
             _page_header(
-                "Monitoring status",
-                "Live device state, upload progress, and local queue health.",
+                "Статус мониторинга",
+                "Состояние устройства, отправка и локальная очередь.",
             )
         )
         layout.addLayout(metrics)
         layout.addWidget(self.control_notice)
+        layout.addWidget(self.battery_notice)
         layout.addWidget(details_box, 1)
 
         _set_variant(self.toggle_button, "primary")
@@ -1005,19 +1030,43 @@ class StatusTab(QWidget):
         self.labels["net_power_mw"].setText(self._power(snapshot.get("net_power_mw")))
         self.labels["last_sample"].setText(state.last_local_sample_time or "-")
         self.labels["last_upload"].setText(state.last_successful_upload_time or "-")
-        self.labels["sync_state"].setText(state.sync_state)
+        self.labels["sync_state"].setText(self._sync_state(state.sync_state))
         self.labels["queue_size"].setText(str(state.queue_size))
         self.labels["last_error"].setText(state.last_error or "-")
 
+        self._refresh_battery_notice(state.extra.get(BATTERY_CHANGE_NOTICE_KEY))
         self._refresh_metrics(snapshot, state)
         self.toggle_button.setText(
-            "Stop Monitoring" if state.collection_running else "Start Monitoring"
+            "Остановить\nмониторинг"
+            if state.collection_running
+            else "Начать\nмониторинг"
         )
         _set_variant(
             self.toggle_button,
             "danger" if state.collection_running else "primary",
         )
         self.toggle_button.setEnabled(self.monitoring_available)
+
+    def _refresh_battery_notice(self, notice: Any) -> None:
+        if not notice:
+            self.battery_notice.setText("")
+            self.battery_notice.setToolTip("")
+            self.battery_notice.setVisible(False)
+            return
+
+        self.battery_notice.setText(
+            "Обнаружена смена батареи. Записи пока сохраняются для выбранного "
+            "устройства; если сервер их отклонит, появится выбор устройства."
+        )
+        self.battery_notice.setToolTip("")
+        if isinstance(notice, dict):
+            previous_battery_id = notice.get("previous_battery_id")
+            current_battery_id = notice.get("current_battery_id")
+            if previous_battery_id and current_battery_id:
+                self.battery_notice.setToolTip(
+                    f"{previous_battery_id} -> {current_battery_id}"
+                )
+        self.battery_notice.setVisible(True)
 
     def _refresh_metrics(self, snapshot: dict[str, Any], state: Any) -> None:
         charge = snapshot.get("charge_percent")
@@ -1060,21 +1109,20 @@ class StatusTab(QWidget):
     def _bool(value: Any) -> str:
         if value is None:
             return "-"
-        return "Yes" if bool(value) else "No"
+        return "Да" if bool(value) else "Нет"
 
     @staticmethod
     def _power(value: Any) -> str:
         if value is None:
             return "-"
-        return f"{int(value)} mW"
+        return f"{int(value)} мВт"
 
     @staticmethod
     def _interval(value: int) -> str:
         if value >= 1000 and value % 1000 == 0:
             seconds = value // 1000
-            unit = "second" if seconds == 1 else "seconds"
-            return f"{seconds} {unit} ({value} ms)"
-        return f"{value} ms"
+            return f"{seconds} с"
+        return f"{value} мс"
 
     @staticmethod
     def _sync_state(value: str) -> str:
@@ -1082,16 +1130,17 @@ class StatusTab(QWidget):
 
     @staticmethod
     def _sync_role(value: str) -> str:
-        if value in {"uploaded", "queued", "empty", "idle"}:
+        if value in {"uploaded", "queued", "empty", "idle", "online"}:
             return "success"
         if value in {
             "uploading",
+            "retrying",
             "waiting for discharge",
             "waiting for change",
             "waiting for AC confirmation",
         }:
             return "warning"
-        if value == "offline":
+        if value in {"offline", "auth error", "setup required"}:
             return "danger"
         return "muted"
 
@@ -1101,30 +1150,30 @@ class LogsTab(QWidget):
         super().__init__()
         self.setObjectName("LogsTab")
         self.context = context
-        self.refresh_button = QPushButton("Refresh")
-        self.delete_logs_button = QPushButton("Delete Local Logs")
+        self.refresh_button = QPushButton("Обновить")
+        self.delete_logs_button = QPushButton("Удалить локальные логи")
         self.status_label = QLabel("")
         self.status_label.setObjectName("SectionNote")
         self.status_label.setWordWrap(True)
         self.samples_table = QTableWidget(0, 6)
         self.samples_table.setHorizontalHeaderLabels(
-            ["ID", "Client Time", "Battery", "Boot Session", "Seq", "Status"]
+            ["ID", "Время клиента", "Батарея", "Сессия", "№", "Статус"]
         )
         self.uploads_table = QTableWidget(0, 5)
         self.uploads_table.setHorizontalHeaderLabels(
-            ["ID", "Time", "Status", "Samples", "Error"]
+            ["ID", "Время", "Статус", "Записи", "Ошибка"]
         )
         self.logs_table = QTableWidget(0, 5)
         self.logs_table.setHorizontalHeaderLabels(
-            ["ID", "Time", "Level", "Category", "Message"]
+            ["ID", "Время", "Уровень", "Категория", "Сообщение"]
         )
         for table in [self.samples_table, self.uploads_table, self.logs_table]:
             _configure_table(table)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.samples_table, "Local Samples")
-        self.tabs.addTab(self.uploads_table, "Upload Batches")
-        self.tabs.addTab(self.logs_table, "Diagnostics")
+        self.tabs.addTab(self.samples_table, "Локальные записи")
+        self.tabs.addTab(self.uploads_table, "Отправки")
+        self.tabs.addTab(self.logs_table, "Диагностика")
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.refresh_button)
@@ -1136,8 +1185,8 @@ class LogsTab(QWidget):
         layout.setSpacing(14)
         layout.addWidget(
             _page_header(
-                "Local activity",
-                "Recent samples, upload attempts, and diagnostic messages.",
+                "Локальная активность",
+                "Последние записи, попытки отправки и диагностические сообщения.",
             )
         )
         layout.addLayout(button_row)
@@ -1154,9 +1203,9 @@ class LogsTab(QWidget):
         sample_count = self._populate_samples()
         upload_count = self._populate_uploads()
         log_count = self._populate_logs()
-        self.tabs.setTabText(0, f"Local Samples ({sample_count})")
-        self.tabs.setTabText(1, f"Upload Batches ({upload_count})")
-        self.tabs.setTabText(2, f"Diagnostics ({log_count})")
+        self.tabs.setTabText(0, f"Локальные записи ({sample_count})")
+        self.tabs.setTabText(1, f"Отправки ({upload_count})")
+        self.tabs.setTabText(2, f"Диагностика ({log_count})")
 
     def _populate_samples(self) -> int:
         samples = self.context.sample_queue.recent_samples(limit=100)
@@ -1202,17 +1251,23 @@ class LogsTab(QWidget):
         return len(logs)
 
     def _delete_local_logs(self) -> None:
-        answer = QMessageBox.question(
-            self,
-            "Delete Local Logs",
-            (
-                "Delete local sample history, upload batch diagnostics, and "
-                "diagnostic messages? The unsent retry queue will not be deleted."
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("Удалить локальные логи")
+        message_box.setText(
+            "Удалить локальную историю записей, диагностику отправок и "
+            "диагностические сообщения? Очередь неотправленных данных не будет удалена."
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        delete_button = message_box.addButton(
+            "Удалить",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        cancel_button = message_box.addButton(
+            "Отмена",
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        message_box.setDefaultButton(cancel_button)
+        message_box.exec()
+        if message_box.clickedButton() != delete_button:
             return
 
         deleted_samples = self.context.sample_queue.clear_local_sample_history()
@@ -1221,10 +1276,10 @@ class LogsTab(QWidget):
         self.refresh()
         self.context.telemetry_manager.refresh_queue_size()
         self.status_label.setText(
-            "Deleted local logs: "
-            f"{deleted_samples} sample(s), "
-            f"{deleted_uploads} upload batch record(s), "
-            f"{deleted_logs} diagnostic message(s)."
+            "Удалены локальные логи: "
+            f"{deleted_samples} записей, "
+            f"{deleted_uploads} записей отправки, "
+            f"{deleted_logs} диагностических сообщений."
         )
 
     @staticmethod
@@ -1242,23 +1297,26 @@ class SettingsTab(QWidget):
         super().__init__()
         self.setObjectName("SettingsTab")
         self.context = context
+        self._status_clear_token = 0
         self.api_base_url = QLineEdit(context.settings.api_base_url)
         self.api_base_url.setPlaceholderText("http://127.0.0.1:8000")
         self.upload_interval = QSpinBox()
         self.upload_interval.setRange(1000, 300000)
-        self.upload_interval.setSuffix(" ms")
+        self.upload_interval.setSuffix(" мс")
         self.upload_interval.setValue(context.settings.upload_interval_ms)
+        self.upload_interval.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.reference_capacity = QSpinBox()
-        self.reference_capacity.setRange(0, 300000)
-        self.reference_capacity.setSuffix(" mWh")
-        self.reference_capacity.setSpecialValueText("Unset")
+        self.reference_capacity.setRange(-300000, 300000)
+        self.reference_capacity.setSuffix(" мВт·ч")
+        self.reference_capacity.setValue(0)
         self.reference_capacity.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.reference_capacity.setToolTip("0 означает использовать системную емкость.")
         binding = context.device_binding_service.get_binding()
-        if binding and binding.reference_capacity_mwh:
+        if binding and binding.reference_capacity_mwh is not None:
             self.reference_capacity.setValue(binding.reference_capacity_mwh)
 
-        self.tray_mode = QCheckBox("Minimize to tray on close")
-        self.autostart = QCheckBox("Launch on sign-in")
+        self.tray_mode = QCheckBox("Сворачивать в трей при закрытии")
+        self.autostart = QCheckBox("Запускать при входе в систему")
         self.tray_mode.setChecked(
             context.settings.get_bool(SettingsService.TRAY_MODE_ENABLED)
         )
@@ -1266,27 +1324,31 @@ class SettingsTab(QWidget):
             context.settings.get_bool(SettingsService.AUTOSTART_ENABLED)
         )
 
-        self.save_button = QPushButton("Save Settings")
-        self.switch_device_button = QPushButton("Switch Device")
-        self.logout_button = QPushButton("Logout")
+        self.save_button = QPushButton("Сохранить")
+        self.save_button.setToolTip(
+            "Сохраняет URL сервера, интервал отправки, эталонную емкость, "
+            "режим трея и автозапуск."
+        )
+        self.switch_device_button = QPushButton("Сменить устройство")
+        self.logout_button = QPushButton("Выйти")
         self.status_label = QLabel("")
         self.status_label.setObjectName("SectionNote")
         self.status_label.setWordWrap(True)
 
-        connection_box = QGroupBox("Connection")
+        connection_box = QGroupBox("Подключение")
         connection_box.setObjectName("Panel")
         connection_form = QFormLayout(connection_box)
         connection_form.setSpacing(12)
-        connection_form.addRow("Backend URL", self.api_base_url)
+        connection_form.addRow("URL сервера", self.api_base_url)
 
-        collection_box = QGroupBox("Collection")
+        collection_box = QGroupBox("Сбор данных")
         collection_box.setObjectName("Panel")
         collection_form = QFormLayout(collection_box)
         collection_form.setSpacing(12)
-        collection_form.addRow("Upload interval", self.upload_interval)
-        collection_form.addRow("Reference capacity", self.reference_capacity)
+        collection_form.addRow("Интервал отправки", self.upload_interval)
+        collection_form.addRow("Эталонная емкость", self.reference_capacity)
 
-        system_box = QGroupBox("System")
+        system_box = QGroupBox("Система")
         system_box.setObjectName("Panel")
         system_layout = QVBoxLayout(system_box)
         system_layout.setSpacing(10)
@@ -1307,8 +1369,8 @@ class SettingsTab(QWidget):
         layout.setSpacing(14)
         layout.addWidget(
             _page_header(
-                "Settings",
-                "Connection, collection cadence, and desktop integration.",
+                "Настройки",
+                "Подключение, отправка данных и интеграция с системой.",
             )
         )
         layout.addWidget(connection_box)
@@ -1333,7 +1395,7 @@ class SettingsTab(QWidget):
             SettingsService.UPLOAD_INTERVAL_MS,
             self.upload_interval.value(),
         )
-        reference_capacity = self.reference_capacity.value() or None
+        reference_capacity = self.reference_capacity.value()
         self.context.device_binding_service.update_reference_capacity(reference_capacity)
         self.context.settings.set_bool(
             SettingsService.TRAY_MODE_ENABLED,
@@ -1351,13 +1413,26 @@ class SettingsTab(QWidget):
         except Exception as exc:
             self.context.log_service.add("error", "platform", str(exc))
         if autostart_result is False and self.autostart.isChecked():
-            self.status_label.setText("Settings saved. Auto-start is not available here.")
+            self._show_temporary_status(
+                "Сохранено: URL сервера, интервал отправки, эталонная емкость, "
+                "режим трея. Автозапуск здесь недоступен."
+            )
         else:
-            self.status_label.setText(
-                "Settings saved. "
-                f"Upload every {self.upload_interval.value()} ms."
+            self._show_temporary_status(
+                "Сохранено: URL сервера, интервал отправки, эталонная емкость, "
+                "режим трея и автозапуск."
             )
         self.settings_saved.emit()
+
+    def _show_temporary_status(self, message: str) -> None:
+        self._status_clear_token += 1
+        token = self._status_clear_token
+        self.status_label.setText(message)
+        QTimer.singleShot(3000, lambda: self._clear_status_if_current(token))
+
+    def _clear_status_if_current(self, token: int) -> None:
+        if token == self._status_clear_token:
+            self.status_label.setText("")
 
 
 class ShellPage(QWidget):
@@ -1375,9 +1450,9 @@ class ShellPage(QWidget):
         self.monitoring_available = True
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.status_tab, "Status")
-        self.tabs.addTab(self.logs_tab, "Local Logs")
-        self.tabs.addTab(self.settings_tab, "Settings")
+        self.tabs.addTab(self.status_tab, "Статус")
+        self.tabs.addTab(self.logs_tab, "Локальные логи")
+        self.tabs.addTab(self.settings_tab, "Настройки")
         self.tabs.setIconSize(self.tabs.iconSize())
         style = self.style()
         computer_icon = getattr(
@@ -1434,8 +1509,8 @@ class MainWindow(QMainWindow):
     def __init__(self, context: AppContext) -> None:
         super().__init__()
         self.context = context
-        self.setWindowTitle("Battery Monitoring Client")
-        self.setMinimumSize(700, 500)
+        self.setWindowTitle("Мониторинг батареи")
+        self.setMinimumSize(880, 680)
         self.setStyleSheet(APP_STYLESHEET)
         self._allow_close = False
         self._upload_in_progress = False
@@ -1471,7 +1546,7 @@ class MainWindow(QMainWindow):
         self.server_error_grace_timer.timeout.connect(self._server_error_grace_expired)
 
         self.login_page.logged_in.connect(self._after_authentication)
-        self.binding_page.binding_completed.connect(self._show_shell)
+        self.binding_page.binding_completed.connect(self._binding_completed)
         self.binding_page.logout_requested.connect(self._logout)
         self.binding_page.server_availability_changed.connect(
             self._set_backend_available
@@ -1485,7 +1560,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._restore_session)
 
     def _restore_session(self) -> None:
-        self.login_page.set_error("Restoring session...")
+        self.login_page.set_error("Восстановление сессии...")
         self.login_page._set_busy(True)
         _run_background(
             self,
@@ -1507,10 +1582,63 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.login_page)
 
     def _after_authentication(self) -> None:
+        if not self._binding_matches_current_user():
+            self._clear_user_scoped_local_state()
+
         if self.context.device_binding_service.get_binding() is None:
             self._show_binding()
         else:
             self._show_shell()
+
+    def _binding_completed(self) -> None:
+        self._mark_binding_for_current_user()
+        self.context.telemetry_manager.reset_observed_battery()
+        self._show_shell()
+
+    def _current_user_key(self) -> str | None:
+        user = self.context.auth_service.current_user
+        if user is None:
+            return None
+        if user.id:
+            return user.id
+        email = user.email.strip().lower()
+        return email or None
+
+    def _binding_matches_current_user(self) -> bool:
+        binding = self.context.device_binding_service.get_binding()
+        if binding is None:
+            return True
+
+        current_user_key = self._current_user_key()
+        binding_user_key = self.context.device_binding_service.get_binding_user_key()
+        return bool(current_user_key and binding_user_key == current_user_key)
+
+    def _mark_binding_for_current_user(self) -> None:
+        current_user_key = self._current_user_key()
+        if current_user_key is None:
+            return
+        if self.context.device_binding_service.get_binding() is not None:
+            self.context.device_binding_service.set_binding_user_key(current_user_key)
+
+    def _clear_user_scoped_local_state(self) -> None:
+        self.context.device_binding_service.clear_binding()
+        deleted_samples = self.context.sample_queue.clear_local_sample_history()
+        deleted_pending = self.context.sample_queue.clear_pending_samples()
+        deleted_uploads = self.context.log_service.clear_upload_batches()
+        deleted_logs = self.context.log_service.clear_diagnostic_logs()
+        self.context.telemetry_manager.reset_observed_battery()
+        self.context.telemetry_manager.refresh_queue_size()
+        self.context.log_service.add(
+            "warning",
+            "auth",
+            "Cleared local state after account change.",
+            {
+                "local_samples": deleted_samples,
+                "pending_samples": deleted_pending,
+                "upload_batches": deleted_uploads,
+                "diagnostic_logs": deleted_logs,
+            },
+        )
 
     def _show_binding(self) -> None:
         self._stop_timers()
@@ -1521,7 +1649,7 @@ class MainWindow(QMainWindow):
         if self.context.telemetry_manager.state.collection_running:
             self.shell_page.set_monitoring_available(
                 False,
-                "Stopping monitoring and ending the active session before switching devices.",
+                "Остановка мониторинга и завершение активной сессии перед сменой устройства.",
             )
             self._complete_active_session(after_upload=self._show_binding_if_queue_empty)
             return
@@ -1535,8 +1663,8 @@ class MainWindow(QMainWindow):
             self.shell_page.set_monitoring_available(
                 self._backend_available or self._is_server_error_grace_active(),
                 (
-                    "Device switching is blocked until the current device's "
-                    f"{queue_size} pending sample(s) are uploaded."
+                    "Смена устройства заблокирована, пока не будут отправлены "
+                    f"ожидающие записи текущего устройства: {queue_size}."
                 ),
             )
             self.shell_page.refresh()
@@ -1561,7 +1689,7 @@ class MainWindow(QMainWindow):
             self.context.telemetry_manager.stop()
             self.shell_page.set_monitoring_available(
                 False,
-                "Monitoring is unavailable until the backend server responds.",
+                "Мониторинг недоступен, пока сервер не ответит.",
             )
         self.shell_page.refresh()
 
@@ -1614,7 +1742,7 @@ class MainWindow(QMainWindow):
         if not self.shell_page.monitoring_available:
             self.shell_page.set_monitoring_available(
                 False,
-                "Monitoring is unavailable until the backend server responds.",
+                "Мониторинг недоступен, пока сервер не ответит.",
             )
             return
 
@@ -1629,7 +1757,7 @@ class MainWindow(QMainWindow):
             else:
                 self.shell_page.set_monitoring_available(
                     False,
-                    "Monitoring is unavailable until the backend server responds.",
+                    "Мониторинг недоступен, пока сервер не ответит.",
                 )
                 self.shell_page.refresh()
                 return
@@ -1698,7 +1826,7 @@ class MainWindow(QMainWindow):
     def _handle_client_upload_error(self, result: UploadResult) -> None:
         message = (
             result.error
-            or "The backend rejected the selected device. Choose a device again."
+            or "Сервер отклонил выбранное устройство. Выберите устройство снова."
         )
         self.context.telemetry_manager.state.sync_state = "setup required"
         self.context.telemetry_manager.state.last_error = message
@@ -1722,8 +1850,8 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _backend_unavailable_title(result: UploadResult) -> str:
         if result.status_code is None:
-            return "Backend is unavailable."
-        return f"Backend server error ({result.status_code})."
+            return "Сервер недоступен."
+        return f"Ошибка сервера ({result.status_code})."
 
     def _should_keep_recording_after_server_error(self) -> bool:
         manager = self.context.telemetry_manager
@@ -1758,8 +1886,8 @@ class MainWindow(QMainWindow):
 
     def _stop_recording_after_server_errors(self, status_code: int, message: str) -> None:
         notice = (
-            f"{self._server_error_label(status_code)} Repeated during the 90-second "
-            "local recording window. Monitoring is stopped until the server responds."
+            f"{self._server_error_label(status_code)} Ошибка повторилась в течение "
+            "90-секундного окна локальной записи. Мониторинг остановлен, пока сервер не ответит."
         )
         self.context.telemetry_manager.state.sync_state = "offline"
         self.context.telemetry_manager.state.last_error = message
@@ -1782,7 +1910,7 @@ class MainWindow(QMainWindow):
 
         message = (
             self.context.telemetry_manager.state.last_error
-            or "Backend is unavailable."
+            or "Сервер недоступен."
         )
         self._stop_recording_after_server_errors(500, message)
 
@@ -1794,21 +1922,21 @@ class MainWindow(QMainWindow):
 
     def _offline_grace_notice(self, status_code: int | None = None) -> str:
         label = (
-            "Backend is unavailable."
+            "Сервер недоступен."
             if status_code is None
             else self._server_error_label(status_code)
         )
         return (
-            f"{label} Local recording will continue for 90 seconds; another "
-            "server error during this window will stop it. Health is checked "
-            "every 10 seconds."
+            f"{label} Локальная запись продолжится 90 секунд; повторная "
+            "ошибка сервера в это время остановит запись. Проверка состояния "
+            "выполняется каждые 10 секунд."
         )
 
     @staticmethod
     def _server_error_label(status_code: int) -> str:
         if status_code == 500:
-            return "Backend is unavailable."
-        return f"Backend server error ({status_code})."
+            return "Сервер недоступен."
+        return f"Ошибка сервера ({status_code})."
 
     def _upload_failed(self, exc: Exception) -> None:
         self.context.telemetry_manager.state.sync_state = "offline"
@@ -1862,12 +1990,12 @@ class MainWindow(QMainWindow):
 
     def _health_check_failed(self, exc: Exception) -> None:
         if self._is_server_error_grace_active():
-            message = f"{self._offline_grace_notice()} Last health check failed: {exc}"
+            message = f"{self._offline_grace_notice()} Последняя проверка состояния не удалась: {exc}"
             self.shell_page.set_monitoring_available(True, message)
         else:
             message = (
-                "Backend is still unavailable. Monitoring and device selection remain "
-                f"locked. {exc}"
+                "Сервер все еще недоступен. Мониторинг и выбор устройства "
+                f"заблокированы. {exc}"
             )
             self.shell_page.set_monitoring_available(False, message)
         if self.stack.currentWidget() == self.binding_page:
@@ -1906,10 +2034,11 @@ class MainWindow(QMainWindow):
         self.server_error_grace_timer.stop()
         self._health_check_in_progress = False
         self.context.telemetry_manager.stop()
+        self.context.telemetry_manager.reset_observed_battery()
         try:
             self.context.auth_service.logout()
         except Exception as exc:
-            QMessageBox.warning(self, "Logout", str(exc))
+            QMessageBox.warning(self, "Выход", str(exc))
         self.stack.setCurrentWidget(self.login_page)
 
     def _ensure_tray_icon(self) -> None:
@@ -1919,12 +2048,12 @@ class MainWindow(QMainWindow):
         self.tray_icon = QSystemTrayIcon(self)
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray_icon.setIcon(icon)
-        self.tray_icon.setToolTip("Battery Monitoring Client")
+        self.tray_icon.setToolTip("Мониторинг батареи")
 
         menu = QMenu()
-        show_action = QAction("Show", self)
-        toggle_action = QAction("Start/Stop Monitoring", self)
-        quit_action = QAction("Quit", self)
+        show_action = QAction("Показать", self)
+        toggle_action = QAction("Запустить/остановить мониторинг", self)
+        quit_action = QAction("Выйти", self)
         show_action.triggered.connect(self._restore_from_tray)
         toggle_action.triggered.connect(self._toggle_monitoring)
         quit_action.triggered.connect(self._quit_from_tray)

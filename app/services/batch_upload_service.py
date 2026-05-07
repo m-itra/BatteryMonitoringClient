@@ -132,10 +132,9 @@ class BatchUploadService:
         body: dict[str, Any] = {
             "device_name": binding.device_name,
             "battery_id": samples[0].battery_id,
+            "reference_capacity_mwh": binding.reference_capacity_mwh or 0,
             "samples": SampleQueueService.upload_samples(samples),
         }
         if binding.device_id:
             body["device_id"] = binding.device_id
-        if binding.reference_capacity_mwh is not None:
-            body["reference_capacity_mwh"] = binding.reference_capacity_mwh
         return body

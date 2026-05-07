@@ -16,6 +16,7 @@ from windows_battery_collector import (
 
 AC_COMPLETION_CONFIRMATION_SAMPLES = 2
 LOCAL_SAMPLE_COMPLETED_SESSION_LIMIT = 10
+BATTERY_CHANGE_NOTICE_KEY = "battery_change_notice"
 
 
 class TelemetryManager:
@@ -34,6 +35,7 @@ class TelemetryManager:
         self._collector = collector
         self._last_skip_reason: str | None = None
         self._last_queued_sample_signature: tuple[object, ...] | None = None
+        self._last_observed_battery_id: str | None = None
         self._ac_connected_confirmation_count = 0
         self._forced_ac_confirmations_remaining = 0
         self.state = TelemetryState(queue_size=self.sample_queue.count_pending())
@@ -91,6 +93,7 @@ class TelemetryManager:
 
         self.state.current_snapshot = snapshot.to_dict()
         self.state.extra["last_observed_time"] = snapshot.client_time
+        self._detect_battery_change(snapshot)
 
         should_queue, reason = self._should_queue_snapshot(snapshot)
         if not should_queue:
@@ -155,6 +158,10 @@ class TelemetryManager:
     def refresh_queue_size(self) -> None:
         self.state.queue_size = self.sample_queue.count_pending()
 
+    def reset_observed_battery(self) -> None:
+        self._last_observed_battery_id = None
+        self.state.extra.pop(BATTERY_CHANGE_NOTICE_KEY, None)
+
     def _get_collector(self) -> WindowsBatteryCollector:
         if self._collector is None:
             self._collector = WindowsBatteryCollector()
@@ -218,6 +225,29 @@ class TelemetryManager:
             and self._ac_connected_confirmation_count >= AC_COMPLETION_CONFIRMATION_SAMPLES
         )
 
+    def _detect_battery_change(self, snapshot: BatterySnapshot) -> None:
+        current_battery_id = self._normalized_battery_id(snapshot.battery_id)
+        if current_battery_id is None:
+            return
+
+        previous_battery_id = self._last_observed_battery_id
+        if previous_battery_id is not None and current_battery_id != previous_battery_id:
+            self.state.extra[BATTERY_CHANGE_NOTICE_KEY] = {
+                "previous_battery_id": previous_battery_id,
+                "current_battery_id": current_battery_id,
+            }
+            self.log_service.add(
+                "warning",
+                "telemetry",
+                "Battery device identity changed.",
+                {
+                    "previous_battery_id": previous_battery_id,
+                    "current_battery_id": current_battery_id,
+                },
+            )
+
+        self._last_observed_battery_id = current_battery_id
+
     def _prune_completed_session_history(self) -> None:
         result = self.sample_queue.prune_local_history_to_recent_sessions(
             LOCAL_SAMPLE_COMPLETED_SESSION_LIMIT,
@@ -247,6 +277,13 @@ class TelemetryManager:
             snapshot.status,
             snapshot.cycle_count,
         )
+
+    @staticmethod
+    def _normalized_battery_id(value: object) -> str | None:
+        if value is None:
+            return None
+        battery_id = str(value).strip()
+        return battery_id or None
 
     @staticmethod
     def _skip_reason(snapshot: BatterySnapshot) -> str:

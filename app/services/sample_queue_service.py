@@ -153,6 +153,11 @@ class SampleQueueService:
             cursor = connection.execute("DELETE FROM local_samples")
             return int(cursor.rowcount)
 
+    def clear_pending_samples(self) -> int:
+        with self.database.connect() as connection:
+            cursor = connection.execute("DELETE FROM pending_samples")
+            return int(cursor.rowcount)
+
     def prune_local_history_to_recent_sessions(
         self,
         max_completed_sessions: int,

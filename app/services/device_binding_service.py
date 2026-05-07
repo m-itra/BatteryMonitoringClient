@@ -44,6 +44,12 @@ class DeviceBindingService:
             reference_capacity_mwh=reference_capacity,
         )
 
+    def get_binding_user_key(self) -> str | None:
+        return self.settings.get(SettingsService.SELECTED_DEVICE_USER_KEY)
+
+    def set_binding_user_key(self, user_key: str) -> None:
+        self.settings.set(SettingsService.SELECTED_DEVICE_USER_KEY, user_key)
+
     def bind_existing(self, device: DeviceSummary) -> DeviceBinding:
         binding = DeviceBinding(
             device_id=device.device_id,
@@ -107,6 +113,7 @@ class DeviceBindingService:
     def clear_binding(self) -> None:
         self.settings.delete(SettingsService.SELECTED_DEVICE_ID)
         self.settings.delete(SettingsService.SELECTED_DEVICE_NAME)
+        self.settings.delete(SettingsService.SELECTED_DEVICE_USER_KEY)
         self.settings.delete(SettingsService.REFERENCE_CAPACITY_MWH)
         self.log_service.add("warning", "device", "Local device binding cleared.")
 
