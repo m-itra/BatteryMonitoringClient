@@ -470,7 +470,6 @@ class LoginPage(QWidget):
         self.password_input.setPlaceholderText("Password")
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.login_button = QPushButton("Sign in")
-        self.register_button = QPushButton("Create account")
         self.status_label = QLabel("")
         self.status_label.setObjectName("SectionNote")
         self.status_label.setWordWrap(True)
@@ -513,19 +512,15 @@ class LoginPage(QWidget):
         card_layout.addLayout(form)
 
         button_row = QHBoxLayout()
-        button_row.addWidget(self.login_button)
-        button_row.addWidget(self.register_button)
+        button_row.addWidget(self.login_button, 1)
         card_layout.addLayout(button_row)
         card_layout.addWidget(self.status_label)
         layout.addWidget(card, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(2)
 
         _set_variant(self.login_button, "primary")
-        _set_variant(self.register_button, "subtle")
         _set_standard_icon(self.login_button, "SP_DialogApplyButton")
-        _set_standard_icon(self.register_button, "SP_FileDialogNewFolder")
         self.login_button.clicked.connect(self._login)
-        self.register_button.clicked.connect(self._register)
         self.password_input.returnPressed.connect(self._login)
 
     def set_error(self, message: str) -> None:
@@ -533,9 +528,6 @@ class LoginPage(QWidget):
 
     def _login(self) -> None:
         self._submit_auth("Signing in...", self.context.auth_service.login)
-
-    def _register(self) -> None:
-        self._submit_auth("Registering...", self.context.auth_service.register)
 
     def _submit_auth(
         self,
@@ -561,7 +553,6 @@ class LoginPage(QWidget):
 
     def _set_busy(self, busy: bool) -> None:
         self.login_button.setEnabled(not busy)
-        self.register_button.setEnabled(not busy)
 
     def _auth_succeeded(self, _result: Any) -> None:
         self.status_label.setText("")
