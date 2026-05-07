@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import platform
+import subprocess
 import sys
 import time
 import uuid
@@ -36,6 +37,14 @@ class BootSessionService:
         stored_session_id = self.settings.get(SettingsService.BOOT_SESSION_ID)
         last_sample_seq = self.settings.get_int(SettingsService.LAST_SAMPLE_SEQ, 0) or 0
 
+        if stored_session_id and self._signature_matches_current(
+            stored_signature,
+            current_signature,
+        ):
+            if stored_signature != current_signature:
+                self.settings.set(SettingsService.BOOT_SIGNATURE, current_signature)
+            return stored_session_id, last_sample_seq
+
         if current_signature != stored_signature or not stored_session_id:
             boot_session_id = str(uuid.uuid4())
             self.settings.set(SettingsService.BOOT_SIGNATURE, current_signature)
@@ -55,16 +64,27 @@ class BootSessionService:
 
         return stored_session_id, last_sample_seq
 
+    def _signature_matches_current(
+        self,
+        stored_signature: str | None,
+        current_signature: str,
+    ) -> bool:
+        if stored_signature == current_signature:
+            return True
+        if sys.platform == "win32" and current_signature.startswith("windows:boot_time:"):
+            return stored_signature == self._windows_uptime_boot_signature()
+        return False
+
     @staticmethod
     def _current_boot_signature() -> str:
         if sys.platform == "win32":
-            try:
-                uptime_ms = ctypes.windll.kernel32.GetTickCount64()
-                raw_boot_epoch = time.time() - (int(uptime_ms) / 1000)
-                boot_epoch = round(raw_boot_epoch / 10) * 10
-                return f"windows:{boot_epoch}"
-            except Exception:
-                return f"windows:{platform.node()}:unknown"
+            boot_time = BootSessionService._windows_boot_time()
+            if boot_time:
+                return f"windows:boot_time:{boot_time}"
+            fallback_signature = BootSessionService._windows_uptime_boot_signature()
+            if fallback_signature:
+                return fallback_signature
+            return f"windows:{platform.node()}:unknown"
 
         proc_stat = Path("/proc/stat")
         if proc_stat.exists():
@@ -76,3 +96,85 @@ class BootSessionService:
                 pass
 
         return f"{platform.system().lower()}:{platform.node()}:unknown"
+
+    @staticmethod
+    def _windows_uptime_boot_signature() -> str | None:
+        try:
+            uptime_ms = ctypes.windll.kernel32.GetTickCount64()
+            raw_boot_epoch = time.time() - (int(uptime_ms) / 1000)
+            boot_epoch = round(raw_boot_epoch / 10) * 10
+            return f"windows:{boot_epoch}"
+        except Exception:
+            return None
+
+    @staticmethod
+    def _windows_boot_time() -> str | None:
+        return (
+            BootSessionService._windows_boot_time_from_kernel()
+            or BootSessionService._windows_last_boot_up_time_from_powershell()
+            or BootSessionService._windows_last_boot_up_time_from_wmic()
+        )
+
+    @staticmethod
+    def _windows_boot_time_from_kernel() -> str | None:
+        try:
+            buffer = ctypes.create_string_buffer(48)
+            status = ctypes.windll.ntdll.NtQuerySystemInformation(
+                3,
+                ctypes.byref(buffer),
+                len(buffer),
+                None,
+            )
+            if status != 0:
+                return None
+            boot_time = ctypes.c_longlong.from_buffer_copy(buffer.raw[:8]).value
+        except Exception:
+            return None
+        if boot_time <= 0:
+            return None
+        return str(boot_time)
+
+    @staticmethod
+    def _windows_last_boot_up_time_from_powershell() -> str | None:
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            (
+                "(Get-CimInstance -ClassName Win32_OperatingSystem)"
+                ".LastBootUpTime.ToUniversalTime().ToString('o')"
+            ),
+        ]
+        return BootSessionService._run_boot_signature_command(command)
+
+    @staticmethod
+    def _windows_last_boot_up_time_from_wmic() -> str | None:
+        output = BootSessionService._run_boot_signature_command(
+            ["wmic.exe", "os", "get", "lastbootuptime", "/value"]
+        )
+        if not output:
+            return None
+        for line in output.splitlines():
+            if line.lower().startswith("lastbootuptime="):
+                return line.split("=", 1)[1].strip() or None
+        return None
+
+    @staticmethod
+    def _run_boot_signature_command(command: list[str]) -> str | None:
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+        if completed.returncode != 0:
+            return None
+        output = completed.stdout.strip()
+        return output or None

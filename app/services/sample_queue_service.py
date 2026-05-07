@@ -151,6 +151,7 @@ class SampleQueueService:
 
         with self.database.connect() as connection:
             cursor = connection.execute("DELETE FROM local_samples")
+            self._reset_autoincrement(connection, "local_samples")
             return int(cursor.rowcount)
 
     def clear_pending_samples(self) -> int:
@@ -226,6 +227,10 @@ class SampleQueueService:
                 ORDER BY id ASC
                 """
             ).fetchall()
+
+    @staticmethod
+    def _reset_autoincrement(connection: Any, table_name: str) -> None:
+        connection.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table_name,))
 
     def _delete_local_samples(self, sample_ids: list[int]) -> int:
         deleted_samples = 0

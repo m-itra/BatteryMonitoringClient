@@ -372,7 +372,7 @@ def _set_role(widget: QWidget, role: str) -> None:
     _repolish(widget)
 
 
-def _page_header(title: str, subtitle: str) -> QWidget:
+def _page_header(title: str, subtitle: str = "") -> QWidget:
     container = QWidget()
     layout = QVBoxLayout(container)
     layout.setContentsMargins(0, 0, 0, 10)
@@ -380,12 +380,12 @@ def _page_header(title: str, subtitle: str) -> QWidget:
 
     title_label = QLabel(title)
     title_label.setObjectName("PageTitle")
-    subtitle_label = QLabel(subtitle)
-    subtitle_label.setObjectName("PageSubtitle")
-    subtitle_label.setWordWrap(True)
-
     layout.addWidget(title_label)
-    layout.addWidget(subtitle_label)
+    if subtitle:
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setObjectName("PageSubtitle")
+        subtitle_label.setWordWrap(True)
+        layout.addWidget(subtitle_label)
     return container
 
 
@@ -959,7 +959,6 @@ class StatusTab(QWidget):
         layout.addWidget(
             _page_header(
                 "Статус мониторинга",
-                "Состояние устройства, отправка и локальная очередь.",
             )
         )
         layout.addLayout(metrics)
@@ -1157,7 +1156,7 @@ class LogsTab(QWidget):
         self.status_label.setWordWrap(True)
         self.samples_table = QTableWidget(0, 6)
         self.samples_table.setHorizontalHeaderLabels(
-            ["ID", "Время клиента", "Батарея", "Сессия", "№", "Статус"]
+            ["ID", "Время клиента", "Батарея", "Сессия ОС", "№ в загрузке", "Статус"]
         )
         self.uploads_table = QTableWidget(0, 5)
         self.uploads_table.setHorizontalHeaderLabels(
@@ -1169,6 +1168,7 @@ class LogsTab(QWidget):
         )
         for table in [self.samples_table, self.uploads_table, self.logs_table]:
             _configure_table(table)
+        self._configure_samples_table()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.samples_table, "Локальные записи")
@@ -1186,7 +1186,6 @@ class LogsTab(QWidget):
         layout.addWidget(
             _page_header(
                 "Локальная активность",
-                "Последние записи, попытки отправки и диагностические сообщения.",
             )
         )
         layout.addLayout(button_row)
@@ -1285,7 +1284,24 @@ class LogsTab(QWidget):
     @staticmethod
     def _set_row(table: QTableWidget, row: int, values: list[Any]) -> None:
         for column, value in enumerate(values):
-            table.setItem(row, column, QTableWidgetItem(str(value)))
+            text = str(value)
+            item = QTableWidgetItem(text)
+            item.setToolTip(text)
+            table.setItem(row, column, item)
+
+    def _configure_samples_table(self) -> None:
+        header = self.samples_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(False)
+        self.samples_table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self.samples_table.setColumnWidth(0, 72)
+        self.samples_table.setColumnWidth(1, 220)
+        self.samples_table.setColumnWidth(2, 720)
+        self.samples_table.setColumnWidth(3, 300)
+        self.samples_table.setColumnWidth(4, 120)
+        self.samples_table.setColumnWidth(5, 160)
 
 
 class SettingsTab(QWidget):
@@ -1370,7 +1386,6 @@ class SettingsTab(QWidget):
         layout.addWidget(
             _page_header(
                 "Настройки",
-                "Подключение, отправка данных и интеграция с системой.",
             )
         )
         layout.addWidget(connection_box)
@@ -1500,6 +1515,9 @@ class ShellPage(QWidget):
     def refresh_logs(self) -> None:
         self.logs_tab.refresh()
 
+    def show_status_tab(self) -> None:
+        self.tabs.setCurrentWidget(self.status_tab)
+
     def set_monitoring_available(self, available: bool, message: str = "") -> None:
         self.monitoring_available = available
         self.status_tab.set_monitoring_available(available, message)
@@ -1594,6 +1612,7 @@ class MainWindow(QMainWindow):
         self._mark_binding_for_current_user()
         self.context.telemetry_manager.reset_observed_battery()
         self._show_shell()
+        self.shell_page.show_status_tab()
 
     def _current_user_key(self) -> str | None:
         user = self.context.auth_service.current_user

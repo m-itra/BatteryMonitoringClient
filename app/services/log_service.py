@@ -79,6 +79,7 @@ class LogService:
     def clear_diagnostic_logs(self) -> int:
         with self.database.connect() as connection:
             cursor = connection.execute("DELETE FROM local_logs")
+            self._reset_autoincrement(connection, "local_logs")
             return int(cursor.rowcount)
 
     def recent_upload_batches(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -97,7 +98,12 @@ class LogService:
     def clear_upload_batches(self) -> int:
         with self.database.connect() as connection:
             cursor = connection.execute("DELETE FROM upload_batches")
+            self._reset_autoincrement(connection, "upload_batches")
             return int(cursor.rowcount)
+
+    @staticmethod
+    def _reset_autoincrement(connection: Any, table_name: str) -> None:
+        connection.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table_name,))
 
     def prune_local_history(
         self,

@@ -50,6 +50,7 @@ class AppContext:
             self.settings,
             self.log_service,
         )
+        self.boot_session_service.current_boot_session_id()
         self.sample_queue = SampleQueueService(self.database)
         self.batch_upload_service = BatchUploadService(
             self.api_client,
