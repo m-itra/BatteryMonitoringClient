@@ -64,3 +64,6 @@ class AppContext:
             self.batch_upload_service,
             self.log_service,
         )
+
+    def close(self) -> None:
+        self.api_client.close()

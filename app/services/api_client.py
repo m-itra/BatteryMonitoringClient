@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from app.services.settings_service import SettingsService
@@ -24,6 +25,9 @@ class ApiClient:
     def __init__(self, settings: SettingsService, timeout_seconds: float = 10.0) -> None:
         self.settings = settings
         self.timeout_seconds = timeout_seconds
+        self._client: Any | None = None
+        self._client_base_url: str | None = None
+        self._client_lock = threading.RLock()
 
     @property
     def base_url(self) -> str:
@@ -45,7 +49,8 @@ class ApiClient:
             headers["Authorization"] = f"Bearer {token}"
 
         try:
-            with httpx.Client(base_url=self.base_url, timeout=self.timeout_seconds) as client:
+            with self._client_lock:
+                client = self._get_or_create_client()
                 response = client.request(method, path, json=json, headers=headers)
         except httpx.HTTPError as exc:
             raise ApiError(str(exc)) from exc
@@ -71,6 +76,25 @@ class ApiClient:
         if str(data.get("status") or "").lower() != "healthy":
             raise ApiError("Backend health check did not report healthy status.")
         return data
+
+    def close(self) -> None:
+        with self._client_lock:
+            if self._client is not None:
+                self._client.close()
+                self._client = None
+                self._client_base_url = None
+
+    def _get_or_create_client(self):
+        current_base_url = self.base_url
+        if self._client is None or self._client_base_url != current_base_url:
+            if self._client is not None:
+                self._client.close()
+            self._client = httpx.Client(
+                base_url=current_base_url,
+                timeout=self.timeout_seconds,
+            )
+            self._client_base_url = current_base_url
+        return self._client
 
     @staticmethod
     def _error_message(response) -> str:

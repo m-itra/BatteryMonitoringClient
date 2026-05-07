@@ -1611,6 +1611,7 @@ class MainWindow(QMainWindow):
         self._upload_in_progress = False
         self._health_check_in_progress = False
         QThreadPool.globalInstance().clear()
+        self.context.close()
         if self.tray_icon is not None:
             self.tray_icon.hide()
 
