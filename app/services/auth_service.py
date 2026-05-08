@@ -88,6 +88,14 @@ class AuthService:
             self.current_user = None
             self.log_service.add("warning", "auth", "Stored token was rejected.")
             return None
+        except ApiError as exc:
+            self.log_service.add(
+                "error",
+                "auth",
+                "Session restore request failed.",
+                {"status_code": exc.status_code, "error": str(exc)},
+            )
+            raise
 
         if not isinstance(data, dict):
             raise ApiError("Session response has an unexpected format.")

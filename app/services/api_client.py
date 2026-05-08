@@ -92,6 +92,7 @@ class ApiClient:
             self._client = httpx.Client(
                 base_url=current_base_url,
                 timeout=self.timeout_seconds,
+                trust_env=False,
             )
             self._client_base_url = current_base_url
         return self._client

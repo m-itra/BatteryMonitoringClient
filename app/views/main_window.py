@@ -3,8 +3,8 @@ from __future__ import annotations
 from time import monotonic
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -41,9 +41,14 @@ from app.models.device import DeviceSummary
 from app.models.telemetry import UploadResult
 from app.services.api_client import ApiError
 from app.services.settings_service import SettingsService
-from app.services.telemetry_manager import BATTERY_CHANGE_NOTICE_KEY
+from app.services.telemetry_manager import (
+    BATTERY_CHANGE_NOTICE_KEY,
+    REQUIRED_TELEMETRY_WARNING_KEY,
+)
 from app.storage.secure_token_storage import TokenStorageError
 
+
+WEB_APP_URL = "http://localhost:3000"
 
 APP_STYLESHEET = """
 QMainWindow,
@@ -470,7 +475,7 @@ class LoginPage(QWidget):
         self.setObjectName("LoginPage")
         self.context = context
         self.api_base_url_input = QLineEdit(self.context.settings.api_base_url)
-        self.api_base_url_input.setPlaceholderText("http://127.0.0.1:8000")
+        self.api_base_url_input.setPlaceholderText("http://127.0.0.1:3000")
         self.email_input = QLineEdit()
         self.email_input.setPlaceholderText("name@example.com")
         self.password_input = QLineEdit()
@@ -574,10 +579,23 @@ class LoginPage(QWidget):
         self.logged_in.emit()
 
     def _auth_failed(self, exc: Exception) -> None:
+        if self._is_unregistered_user_error(exc):
+            self.status_label.setText(
+                "Пользователь не зарегистрирован или данные введены неверно."
+            )
+            QDesktopServices.openUrl(QUrl(WEB_APP_URL))
+            return
+
         if isinstance(exc, (ApiError, TokenStorageError)):
             self.status_label.setText(str(exc))
         else:
             self.status_label.setText(str(exc))
+
+    @staticmethod
+    def _is_unregistered_user_error(exc: Exception) -> bool:
+        if not isinstance(exc, ApiError):
+            return False
+        return exc.status_code == 401
 
 
 class DeviceBindingPage(QWidget):
@@ -854,6 +872,14 @@ SYNC_STATE_LABELS = {
 
 SERVER_ERROR_LOCAL_RECORDING_GRACE_SECONDS = 90.0
 BACKEND_HEALTH_CHECK_INTERVAL_MS = 10 * 1000
+TELEMETRY_HELP_URL = f"{WEB_APP_URL}/help"
+
+
+def _notice_field_labels(notice: Any) -> list[str]:
+    if not isinstance(notice, dict):
+        return ["неизвестно"]
+    labels = notice.get("field_labels") or notice.get("fields") or []
+    return [str(label) for label in labels] or ["неизвестно"]
 
 
 class StatusTab(QWidget):
@@ -1315,7 +1341,7 @@ class SettingsTab(QWidget):
         self.context = context
         self._status_clear_token = 0
         self.api_base_url = QLineEdit(context.settings.api_base_url)
-        self.api_base_url.setPlaceholderText("http://127.0.0.1:8000")
+        self.api_base_url.setPlaceholderText("http://127.0.0.1:3000")
         self.upload_interval = QSpinBox()
         self.upload_interval.setRange(1000, 300000)
         self.upload_interval.setSuffix(" мс")
@@ -1537,6 +1563,8 @@ class MainWindow(QMainWindow):
         self._health_check_in_progress = False
         self._upload_again_after_current = False
         self._pending_upload_callbacks: list[Callable[[], None]] = []
+        self._last_required_telemetry_warning_signature: tuple[str, ...] | None = None
+        self._runtime_shutdown = False
         self.tray_icon: QSystemTrayIcon | None = None
 
         self.stack = QStackedWidget()
@@ -1575,7 +1603,33 @@ class MainWindow(QMainWindow):
         self.shell_page.settings_tab.settings_saved.connect(self._apply_timer_settings)
 
         self.stack.setCurrentWidget(self.login_page)
-        QTimer.singleShot(0, self._restore_session)
+        QTimer.singleShot(0, self._run_startup_telemetry_check)
+
+    def _run_startup_telemetry_check(self) -> None:
+        self.login_page.set_error("Проверка батареи...")
+        self.login_page._set_busy(True)
+        _run_background(
+            self,
+            self.context.telemetry_manager.validate_required_telemetry,
+            self._startup_telemetry_check_succeeded,
+            self._startup_telemetry_check_failed,
+        )
+
+    def _startup_telemetry_check_succeeded(self, notice: Any) -> None:
+        if notice:
+            self.login_page._set_busy(False)
+            self._block_unsupported_telemetry(notice)
+            return
+        self._restore_session()
+
+    def _startup_telemetry_check_failed(self, exc: Exception) -> None:
+        self.login_page._set_busy(False)
+        self._block_unsupported_telemetry(
+            {
+                "field_labels": ["данные батареи"],
+                "error": str(exc),
+            }
+        )
 
     def _restore_session(self) -> None:
         self.login_page.set_error("Восстановление сессии...")
@@ -1742,6 +1796,9 @@ class MainWindow(QMainWindow):
             timer.stop()
 
     def _shutdown_runtime(self) -> None:
+        if self._runtime_shutdown:
+            return
+        self._runtime_shutdown = True
         self._stop_timers()
         self.health_timer.stop()
         self.server_error_grace_timer.stop()
@@ -1755,7 +1812,40 @@ class MainWindow(QMainWindow):
 
     def _sample_tick(self) -> None:
         self.context.telemetry_manager.collect_once()
+        self._handle_required_telemetry_warning()
         self.shell_page.refresh()
+
+    def _handle_required_telemetry_warning(self) -> None:
+        notice = self.context.telemetry_manager.state.extra.get(
+            REQUIRED_TELEMETRY_WARNING_KEY
+        )
+        if not isinstance(notice, dict):
+            self._last_required_telemetry_warning_signature = None
+            return
+
+        fields = tuple(str(field) for field in notice.get("fields", []))
+        if not fields or fields == self._last_required_telemetry_warning_signature:
+            return
+
+        self._last_required_telemetry_warning_signature = fields
+        self._block_unsupported_telemetry(notice)
+
+    def _block_unsupported_telemetry(self, notice: Any) -> None:
+        self.login_page.set_error(
+            "Устройство не поддерживается. Приложение будет закрыто."
+        )
+        QDesktopServices.openUrl(QUrl(TELEMETRY_HELP_URL))
+        QMessageBox.critical(
+            self,
+            "Программа не может работать",
+            "Устройство не поддерживается.\n\nПриложение будет закрыто.",
+        )
+        self._allow_close = True
+        self._shutdown_runtime()
+        self.close()
+        application = QApplication.instance()
+        if application is not None:
+            QTimer.singleShot(0, application.quit)
 
     def _toggle_monitoring(self) -> None:
         if not self.shell_page.monitoring_available:
@@ -1828,6 +1918,10 @@ class MainWindow(QMainWindow):
             self.shell_page.refresh()
             return
 
+        if self._is_upload_auth_error(result):
+            self._handle_upload_auth_error(result)
+            return
+
         status_code = result.status_code
         if status_code is not None and 400 <= status_code < 500:
             self._handle_client_upload_error(result)
@@ -1841,6 +1935,35 @@ class MainWindow(QMainWindow):
             if self._backend_available is False:
                 self._set_backend_available(True, "")
         self.shell_page.refresh()
+
+    @staticmethod
+    def _is_upload_auth_error(result: UploadResult) -> bool:
+        error = (result.error or "").lower()
+        return result.status == "auth error" or (
+            "user with id" in error and "not found" in error
+        )
+
+    def _handle_upload_auth_error(self, result: UploadResult) -> None:
+        message = (
+            result.error
+            or "Сессия пользователя больше не действительна. Войдите снова."
+        )
+        self._stop_timers()
+        self.health_timer.stop()
+        self.server_error_grace_timer.stop()
+        self._health_check_in_progress = False
+        self._upload_again_after_current = False
+        self._pending_upload_callbacks = []
+        self._backend_available = True
+        self._server_error_grace_deadline = None
+        self.context.telemetry_manager.state.sync_state = "auth error"
+        self.context.telemetry_manager.state.last_error = message
+        self.context.telemetry_manager.stop()
+        self.context.auth_service.clear_token()
+        self.login_page.set_error(
+            "Пользователь не найден или сессия недействительна. Войдите снова."
+        )
+        self.stack.setCurrentWidget(self.login_page)
 
     def _handle_client_upload_error(self, result: UploadResult) -> None:
         message = (

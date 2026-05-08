@@ -12,6 +12,12 @@ from app.config import (
 from app.storage.database import Database
 
 
+OLD_LOCAL_API_BASE_URLS = {
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+}
+
+
 class SettingsService:
     API_BASE_URL = "api_base_url"
     SELECTED_DEVICE_ID = "selected_device_id"
@@ -93,7 +99,17 @@ class SettingsService:
 
     @property
     def api_base_url(self) -> str:
-        return self.get(self.API_BASE_URL, default_api_base_url()) or default_api_base_url()
+        value = self.get(self.API_BASE_URL)
+        if value is None:
+            return default_api_base_url()
+
+        clean_value = value.strip().rstrip("/")
+        if clean_value in OLD_LOCAL_API_BASE_URLS:
+            migrated_value = default_api_base_url()
+            self.set(self.API_BASE_URL, migrated_value)
+            return migrated_value
+
+        return clean_value or default_api_base_url()
 
     @api_base_url.setter
     def api_base_url(self, value: str) -> None:

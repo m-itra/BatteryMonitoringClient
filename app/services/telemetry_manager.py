@@ -17,6 +17,18 @@ from windows_battery_collector import (
 AC_COMPLETION_CONFIRMATION_SAMPLES = 2
 LOCAL_SAMPLE_COMPLETED_SESSION_LIMIT = 10
 BATTERY_CHANGE_NOTICE_KEY = "battery_change_notice"
+REQUIRED_TELEMETRY_WARNING_KEY = "required_telemetry_warning"
+REQUIRED_SNAPSHOT_FIELDS = {
+    "battery_id": "идентификатор батареи",
+    "ac_connected": "питание от сети",
+    "is_charging": "признак зарядки",
+    "charge_percent": "заряд",
+    "remaining_capacity_mwh": "остаточная емкость",
+    "full_charge_capacity_mwh": "полная емкость",
+    "design_capacity_mwh": "паспортная емкость",
+    "voltage_mv": "напряжение",
+    "net_power_mw": "мощность",
+}
 
 
 class TelemetryManager:
@@ -36,6 +48,7 @@ class TelemetryManager:
         self._last_skip_reason: str | None = None
         self._last_queued_sample_signature: tuple[object, ...] | None = None
         self._last_observed_battery_id: str | None = None
+        self._last_required_fields_warning_signature: tuple[str, ...] | None = None
         self._ac_connected_confirmation_count = 0
         self._forced_ac_confirmations_remaining = 0
         self.state = TelemetryState(queue_size=self.sample_queue.count_pending())
@@ -94,6 +107,7 @@ class TelemetryManager:
         self.state.current_snapshot = snapshot.to_dict()
         self.state.extra["last_observed_time"] = snapshot.client_time
         self._detect_battery_change(snapshot)
+        self._detect_required_field_warning(snapshot)
 
         should_queue, reason = self._should_queue_snapshot(snapshot)
         if not should_queue:
@@ -158,9 +172,25 @@ class TelemetryManager:
     def refresh_queue_size(self) -> None:
         self.state.queue_size = self.sample_queue.count_pending()
 
+    def validate_required_telemetry(self) -> dict[str, object] | None:
+        try:
+            snapshot = self._get_collector().collect_snapshot()
+        except WindowsBatteryCollectorError as exc:
+            return self._set_collector_preflight_error(exc)
+        except Exception as exc:
+            return self._set_collector_preflight_error(exc)
+
+        self.state.current_snapshot = snapshot.to_dict()
+        self.state.extra["last_observed_time"] = snapshot.client_time
+        self._detect_required_field_warning(snapshot)
+        notice = self.state.extra.get(REQUIRED_TELEMETRY_WARNING_KEY)
+        return notice if isinstance(notice, dict) else None
+
     def reset_observed_battery(self) -> None:
         self._last_observed_battery_id = None
         self.state.extra.pop(BATTERY_CHANGE_NOTICE_KEY, None)
+        self._last_required_fields_warning_signature = None
+        self.state.extra.pop(REQUIRED_TELEMETRY_WARNING_KEY, None)
 
     def _get_collector(self) -> WindowsBatteryCollector:
         if self._collector is None:
@@ -247,6 +277,60 @@ class TelemetryManager:
             )
 
         self._last_observed_battery_id = current_battery_id
+
+    def _detect_required_field_warning(self, snapshot: BatterySnapshot) -> None:
+        missing_fields = [
+            field_name
+            for field_name in REQUIRED_SNAPSHOT_FIELDS
+            if getattr(snapshot, field_name) is None
+        ]
+        if not missing_fields:
+            self._last_required_fields_warning_signature = None
+            self.state.extra.pop(REQUIRED_TELEMETRY_WARNING_KEY, None)
+            return
+
+        field_labels = [
+            REQUIRED_SNAPSHOT_FIELDS[field_name]
+            for field_name in missing_fields
+        ]
+        notice = {
+            "fields": missing_fields,
+            "field_labels": field_labels,
+            "battery_id": snapshot.battery_id,
+            "status": snapshot.status,
+        }
+        self.state.extra[REQUIRED_TELEMETRY_WARNING_KEY] = notice
+
+        signature = tuple(missing_fields)
+        if signature == self._last_required_fields_warning_signature:
+            return
+
+        self._last_required_fields_warning_signature = signature
+        self.log_service.add(
+            "warning",
+            "telemetry",
+            "Battery telemetry is missing required fields.",
+            notice,
+        )
+
+    def _set_collector_preflight_error(self, exc: Exception) -> dict[str, object]:
+        message = str(exc)
+        notice: dict[str, object] = {
+            "fields": ["collector"],
+            "field_labels": ["данные батареи"],
+            "status": "collector_error",
+            "error": message,
+        }
+        self.state.sync_state = "offline"
+        self.state.last_error = message
+        self.state.extra[REQUIRED_TELEMETRY_WARNING_KEY] = notice
+        self.log_service.add(
+            "error",
+            "collector",
+            "Battery telemetry preflight failed.",
+            notice,
+        )
+        return notice
 
     def _prune_completed_session_history(self) -> None:
         result = self.sample_queue.prune_local_history_to_recent_sessions(
