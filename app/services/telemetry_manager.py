@@ -19,6 +19,16 @@ AC_COMPLETION_CONFIRMATION_SAMPLES = 2
 LOCAL_SAMPLE_COMPLETED_SESSION_LIMIT = 10
 BATTERY_CHANGE_NOTICE_KEY = "battery_change_notice"
 REQUIRED_TELEMETRY_WARNING_KEY = "required_telemetry_warning"
+ROUTINE_SKIP_REASONS = {
+    "battery values unchanged",
+    "required AC confirmation samples already queued",
+    "battery is charging",
+    "AC power is connected",
+    "battery power is neutral",
+}
+ROUTINE_QUEUE_REASONS = {
+    "AC completion confirmation",
+}
 REQUIRED_SNAPSHOT_FIELDS = {
     "battery_id": "идентификатор батареи",
     "ac_connected": "питание от сети",
@@ -52,6 +62,7 @@ class TelemetryManager:
         self._last_required_fields_warning_signature: tuple[str, ...] | None = None
         self._ac_connected_confirmation_count = 0
         self._forced_ac_confirmations_remaining = 0
+        self._local_history_prune_pending = False
         self.state = TelemetryState(queue_size=self.sample_queue.count_pending())
 
     def start(self) -> None:
@@ -120,12 +131,13 @@ class TelemetryManager:
                 self.state.sync_state = "waiting for discharge"
             self.state.last_error = None
             if reason != self._last_skip_reason:
-                self.log_service.add(
-                    "info",
-                    "telemetry",
-                    "Battery sample skipped.",
-                    {"reason": reason, "status": snapshot.status},
-                )
+                if reason not in ROUTINE_SKIP_REASONS:
+                    self.log_service.add(
+                        "info",
+                        "telemetry",
+                        "Battery sample skipped.",
+                        {"reason": reason, "status": snapshot.status},
+                    )
                 self._last_skip_reason = reason
             return snapshot
 
@@ -135,9 +147,9 @@ class TelemetryManager:
         self._last_queued_sample_signature = self._sample_value_signature(snapshot)
         self._update_confirmation_tracking(snapshot)
         if self._is_completed_session_end(snapshot):
-            self._prune_completed_session_history()
+            self._local_history_prune_pending = True
         self.state.last_local_sample_time = snapshot.client_time
-        self.state.queue_size = self.sample_queue.count_pending()
+        self.state.queue_size += 1
         if self.state.sync_state in {
             "idle",
             "offline",
@@ -146,7 +158,7 @@ class TelemetryManager:
             "waiting for AC confirmation",
         }:
             self.state.sync_state = "queued"
-        if reason:
+        if reason and reason not in ROUTINE_QUEUE_REASONS:
             self.log_service.add(
                 "info",
                 "telemetry",
@@ -156,6 +168,7 @@ class TelemetryManager:
         return snapshot
 
     def upload_once(self) -> UploadResult:
+        self.flush_pending_samples()
         result = self.batch_upload_service.upload_once()
         self.state.sync_state = result.status
         self.state.queue_size = self.sample_queue.count_pending()
@@ -170,6 +183,13 @@ class TelemetryManager:
 
     def refresh_queue_size(self) -> None:
         self.state.queue_size = self.sample_queue.count_pending()
+
+    def flush_pending_samples(self) -> int:
+        flushed_count, _last_sample_seq = self.sample_queue.flush_buffer()
+        if self._local_history_prune_pending:
+            self._prune_completed_session_history()
+            self._local_history_prune_pending = False
+        return flushed_count
 
     def validate_required_telemetry(self) -> dict[str, object] | None:
         try:
@@ -197,6 +217,10 @@ class TelemetryManager:
         if self._collector is None:
             self._collector = WindowsBatteryCollector()
         return self._collector
+
+    def close(self) -> None:
+        if self._collector is not None:
+            self._collector.close()
 
     @staticmethod
     def _is_discharging(snapshot: BatterySnapshot) -> bool:

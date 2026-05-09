@@ -17,11 +17,14 @@ class BootSessionService:
     def __init__(self, settings: SettingsService, log_service: LogService | None = None) -> None:
         self.settings = settings
         self.log_service = log_service
+        self._session_initialized = False
+        self._boot_session_id: str | None = None
+        self._last_issued_sample_seq = 0
 
     def next_sample_metadata(self) -> BootSampleMetadata:
         boot_session_id, last_sample_seq = self._ensure_current_session()
         next_seq = last_sample_seq + 1
-        self.settings.set_int(SettingsService.LAST_SAMPLE_SEQ, next_seq)
+        self._last_issued_sample_seq = next_seq
         return BootSampleMetadata(
             boot_session_id=boot_session_id,
             sample_seq=next_seq,
@@ -32,6 +35,9 @@ class BootSessionService:
         return boot_session_id
 
     def _ensure_current_session(self) -> tuple[str, int]:
+        if self._session_initialized and self._boot_session_id is not None:
+            return self._boot_session_id, self._last_issued_sample_seq
+
         current_signature = self._current_boot_signature()
         stored_signature = self.settings.get(SettingsService.BOOT_SIGNATURE)
         stored_session_id = self.settings.get(SettingsService.BOOT_SESSION_ID)
@@ -43,6 +49,9 @@ class BootSessionService:
         ):
             if stored_signature != current_signature:
                 self.settings.set(SettingsService.BOOT_SIGNATURE, current_signature)
+            self._session_initialized = True
+            self._boot_session_id = stored_session_id
+            self._last_issued_sample_seq = last_sample_seq
             return stored_session_id, last_sample_seq
 
         if current_signature != stored_signature or not stored_session_id:
@@ -60,8 +69,14 @@ class BootSessionService:
                         "boot_session_id": boot_session_id,
                     },
                 )
+            self._session_initialized = True
+            self._boot_session_id = boot_session_id
+            self._last_issued_sample_seq = 0
             return boot_session_id, 0
 
+        self._session_initialized = True
+        self._boot_session_id = stored_session_id
+        self._last_issued_sample_seq = last_sample_seq
         return stored_session_id, last_sample_seq
 
     def _signature_matches_current(

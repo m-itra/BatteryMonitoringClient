@@ -1292,6 +1292,7 @@ class LogsTab(QWidget):
         self.delete_logs_button.clicked.connect(self._delete_local_logs)
 
     def refresh(self) -> None:
+        self.context.telemetry_manager.flush_pending_samples()
         sample_count = self._populate_samples()
         upload_count = self._populate_uploads()
         log_count = self._populate_logs()
@@ -1651,13 +1652,11 @@ class MainWindow(QMainWindow):
         self.sample_timer = QTimer(self)
         self.upload_timer = QTimer(self)
         self.refresh_timer = QTimer(self)
-        self.logs_timer = QTimer(self)
         self.health_timer = QTimer(self)
         self.server_error_grace_timer = QTimer(self)
         self.sample_timer.timeout.connect(self._sample_tick)
         self.upload_timer.timeout.connect(self._upload_tick)
         self.refresh_timer.timeout.connect(self.shell_page.refresh)
-        self.logs_timer.timeout.connect(self.shell_page.refresh_logs)
         self.health_timer.setInterval(BACKEND_HEALTH_CHECK_INTERVAL_MS)
         self.health_timer.timeout.connect(self._health_tick)
         self.server_error_grace_timer.setSingleShot(True)
@@ -1776,6 +1775,7 @@ class MainWindow(QMainWindow):
             self.context.device_binding_service.set_binding_user_key(current_user_key)
 
     def _clear_user_scoped_local_state(self) -> None:
+        self._flush_local_buffers()
         self.context.device_binding_service.clear_binding()
         deleted_samples = self.context.sample_queue.clear_local_sample_history()
         deleted_pending = self.context.sample_queue.clear_pending_samples()
@@ -1873,15 +1873,26 @@ class MainWindow(QMainWindow):
             self.sample_timer,
             self.upload_timer,
             self.refresh_timer,
-            self.logs_timer,
         ]:
             timer.stop()
+
+    def _flush_local_buffers(self) -> None:
+        try:
+            self.context.telemetry_manager.flush_pending_samples()
+        except Exception as exc:
+            self.context.telemetry_manager.state.sync_state = "storage error"
+            self.context.telemetry_manager.state.last_error = str(exc)
+            try:
+                self.context.log_service.add("error", "storage", str(exc))
+            except Exception:
+                pass
 
     def _shutdown_runtime(self) -> None:
         if self._runtime_shutdown:
             return
         self._runtime_shutdown = True
         self._stop_timers()
+        self._flush_local_buffers()
         self.health_timer.stop()
         self.server_error_grace_timer.stop()
         self.context.telemetry_manager.stop()
@@ -2106,6 +2117,7 @@ class MainWindow(QMainWindow):
         self.server_error_grace_timer.stop()
         self._set_backend_available(False, notice)
         self._stop_timers()
+        self._flush_local_buffers()
         self.context.telemetry_manager.stop()
         self.shell_page.refresh()
 
@@ -2253,6 +2265,7 @@ class MainWindow(QMainWindow):
         if message and self.stack.currentWidget() == self.binding_page:
             self.binding_page.status_label.setText(message)
         if not available and stop_monitoring:
+            self._flush_local_buffers()
             self.context.telemetry_manager.stop()
 
     @staticmethod
@@ -2270,6 +2283,7 @@ class MainWindow(QMainWindow):
 
     def _logout(self) -> None:
         self._stop_timers()
+        self._flush_local_buffers()
         self.health_timer.stop()
         self.server_error_grace_timer.stop()
         self._health_check_in_progress = False

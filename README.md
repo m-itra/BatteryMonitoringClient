@@ -13,7 +13,7 @@
 
 ## Сборка Windows EXE
 
-Для сборки используется PyInstaller. Он указан в `requirements.txt`.
+Для сборки используется PyInstaller.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt

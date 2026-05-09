@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from threading import Lock
 from typing import Any, Iterable
 
 from app.models.telemetry import BootSampleMetadata, QueuedSample
+from app.services.settings_service import SettingsService
 from app.storage.database import Database
 from windows_battery_collector import BatterySnapshot
 
@@ -29,63 +31,106 @@ UPLOAD_SAMPLE_FIELDS = (
 class SampleQueueService:
     def __init__(self, database: Database) -> None:
         self.database = database
+        self._buffer_lock = Lock()
+        self._sample_buffer: list[tuple[BatterySnapshot, BootSampleMetadata]] = []
 
     def add_snapshot(
         self,
         snapshot: BatterySnapshot,
         metadata: BootSampleMetadata,
     ) -> int:
-        payload = snapshot.to_dict()
-        payload["boot_session_id"] = metadata.boot_session_id
-        payload["sample_seq"] = metadata.sample_seq
-        now = datetime.now().astimezone().isoformat()
+        with self._buffer_lock:
+            self._sample_buffer.append((snapshot, metadata))
+            return len(self._sample_buffer)
 
-        with self.database.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO local_samples (
-                    battery_id,
-                    boot_session_id,
-                    sample_seq,
-                    client_time,
-                    payload_json,
-                    created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    snapshot.battery_id,
-                    metadata.boot_session_id,
-                    metadata.sample_seq,
-                    snapshot.client_time,
-                    json.dumps(payload, ensure_ascii=True),
-                    now,
-                ),
+    def flush_buffer(self) -> tuple[int, int | None]:
+        with self._buffer_lock:
+            buffered_samples = self._sample_buffer
+            self._sample_buffer = []
+
+        if not buffered_samples:
+            return 0, None
+
+        now = datetime.now().astimezone().isoformat()
+        local_rows = []
+        pending_rows = []
+        last_sample_seq = 0
+
+        for snapshot, metadata in buffered_samples:
+            payload = snapshot.to_dict()
+            payload["boot_session_id"] = metadata.boot_session_id
+            payload["sample_seq"] = metadata.sample_seq
+            payload_json = json.dumps(payload, ensure_ascii=True)
+            row = (
+                snapshot.battery_id,
+                metadata.boot_session_id,
+                metadata.sample_seq,
+                snapshot.client_time,
+                payload_json,
+                now,
             )
-            cursor = connection.execute(
-                """
-                INSERT INTO pending_samples (
-                    battery_id,
-                    boot_session_id,
-                    sample_seq,
-                    client_time,
-                    payload_json,
-                    created_at
+            local_rows.append(row)
+            pending_rows.append(row)
+            last_sample_seq = max(last_sample_seq, metadata.sample_seq)
+
+        settings_updated_at = datetime.now().astimezone().isoformat()
+        try:
+            with self.database.connect() as connection:
+                connection.executemany(
+                    """
+                    INSERT INTO local_samples (
+                        battery_id,
+                        boot_session_id,
+                        sample_seq,
+                        client_time,
+                        payload_json,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    local_rows,
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    snapshot.battery_id,
-                    metadata.boot_session_id,
-                    metadata.sample_seq,
-                    snapshot.client_time,
-                    json.dumps(payload, ensure_ascii=True),
-                    now,
-                ),
-            )
-            return int(cursor.lastrowid)
+                connection.executemany(
+                    """
+                    INSERT INTO pending_samples (
+                        battery_id,
+                        boot_session_id,
+                        sample_seq,
+                        client_time,
+                        payload_json,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    pending_rows,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        SettingsService.LAST_SAMPLE_SEQ,
+                        str(last_sample_seq),
+                        settings_updated_at,
+                    ),
+                )
+        except Exception:
+            with self._buffer_lock:
+                self._sample_buffer = buffered_samples + self._sample_buffer
+            raise
+
+        return len(buffered_samples), last_sample_seq
+
+    def pending_buffer_size(self) -> int:
+        with self._buffer_lock:
+            return len(self._sample_buffer)
 
     def read_next_batch(self, limit: int = 50) -> list[QueuedSample]:
+        self.flush_buffer()
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
@@ -123,9 +168,10 @@ class SampleQueueService:
     def count_pending(self) -> int:
         with self.database.connect() as connection:
             row = connection.execute("SELECT COUNT(*) AS count FROM pending_samples").fetchone()
-        return int(row["count"])
+        return int(row["count"]) + self.pending_buffer_size()
 
     def recent_samples(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.flush_buffer()
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
@@ -149,12 +195,14 @@ class SampleQueueService:
     def clear_local_sample_history(self) -> int:
         """Delete displayed sample history without touching the retry queue."""
 
+        self.flush_buffer()
         with self.database.connect() as connection:
             cursor = connection.execute("DELETE FROM local_samples")
             self._reset_autoincrement(connection, "local_samples")
             return int(cursor.rowcount)
 
     def clear_pending_samples(self) -> int:
+        self.flush_buffer()
         with self.database.connect() as connection:
             cursor = connection.execute("DELETE FROM pending_samples")
             return int(cursor.rowcount)
@@ -165,6 +213,7 @@ class SampleQueueService:
         *,
         completion_samples: int,
     ) -> dict[str, int]:
+        self.flush_buffer()
         rows = self._local_sample_rows()
         if not rows:
             return {

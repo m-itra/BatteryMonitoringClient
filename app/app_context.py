@@ -67,4 +67,5 @@ class AppContext:
         )
 
     def close(self) -> None:
+        self.telemetry_manager.close()
         self.api_client.close()

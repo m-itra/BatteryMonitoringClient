@@ -289,6 +289,11 @@ class WindowsBatteryCollector:
     ) -> None:
         self._api = api or _WindowsBatteryApi()
         self._clock = clock or (lambda: datetime.now().astimezone())
+        self._cached_device_path: Optional[str] = None
+        self._cached_handle: Optional[wintypes.HANDLE] = None
+
+    def close(self) -> None:
+        self._reset_cached_handle()
 
     def collect_snapshot(self) -> BatterySnapshot:
         """Collect one battery snapshot.
@@ -304,8 +309,28 @@ class WindowsBatteryCollector:
             system_power_status
         )
 
+        if self._cached_device_path:
+            try:
+                snapshot = self._collect_from_device(
+                    device_path=self._cached_device_path,
+                    fallback_ac_connected=ac_connected,
+                    fallback_charge_percent=system_charge_percent,
+                )
+            except WindowsBatteryCollectorError:
+                logger.debug(
+                    "Cached Windows battery device %s became unreadable",
+                    self._cached_device_path,
+                    exc_info=True,
+                )
+                self._reset_cached_handle()
+            else:
+                if snapshot is not None:
+                    return snapshot
+                self._reset_cached_handle()
+
         device_paths = self._enumerate_battery_device_paths()
         if not device_paths:
+            self._reset_cached_handle()
             return self._empty_snapshot(
                 ac_connected=ac_connected,
                 charge_percent=system_charge_percent,
@@ -325,6 +350,8 @@ class WindowsBatteryCollector:
                     device_path,
                     exc_info=True,
                 )
+                if device_path == self._cached_device_path:
+                    self._reset_cached_handle()
                 continue
 
             if snapshot is not None:
@@ -342,69 +369,66 @@ class WindowsBatteryCollector:
         fallback_ac_connected: Optional[bool],
         fallback_charge_percent: Optional[float],
     ) -> Optional[BatterySnapshot]:
-        handle = self._open_battery_handle(device_path)
-        try:
-            tag = self._query_battery_tag(handle)
-            if tag == 0:
-                return None
+        handle = self._get_battery_handle(device_path)
+        tag = self._query_battery_tag(handle)
+        if tag == 0:
+            return None
 
-            info = self._query_battery_information(handle, tag)
-            status = self._query_battery_status(handle, tag)
-            temperature_c = self._query_battery_temperature(handle, tag)
+        info = self._query_battery_information(handle, tag)
+        status = self._query_battery_status(handle, tag)
+        temperature_c = self._query_battery_temperature(handle, tag)
 
-            uses_relative_units = bool(info.Capabilities & BATTERY_CAPACITY_RELATIVE)
+        uses_relative_units = bool(info.Capabilities & BATTERY_CAPACITY_RELATIVE)
 
-            raw_remaining_capacity = self._normalize_capacity(status.Capacity)
-            raw_full_charge_capacity = self._normalize_positive_capacity(
-                info.FullChargedCapacity
-            )
-            raw_design_capacity = self._normalize_positive_capacity(
-                info.DesignedCapacity
-            )
+        raw_remaining_capacity = self._normalize_capacity(status.Capacity)
+        raw_full_charge_capacity = self._normalize_positive_capacity(
+            info.FullChargedCapacity
+        )
+        raw_design_capacity = self._normalize_positive_capacity(
+            info.DesignedCapacity
+        )
 
-            if uses_relative_units:
-                remaining_capacity_mwh = None
-                full_charge_capacity_mwh = None
-                design_capacity_mwh = None
-            else:
-                remaining_capacity_mwh = raw_remaining_capacity
-                full_charge_capacity_mwh = raw_full_charge_capacity
-                design_capacity_mwh = raw_design_capacity
+        if uses_relative_units:
+            remaining_capacity_mwh = None
+            full_charge_capacity_mwh = None
+            design_capacity_mwh = None
+        else:
+            remaining_capacity_mwh = raw_remaining_capacity
+            full_charge_capacity_mwh = raw_full_charge_capacity
+            design_capacity_mwh = raw_design_capacity
 
-            charge_percent = self._calculate_charge_percent(
-                remaining_capacity=raw_remaining_capacity,
-                full_charge_capacity=raw_full_charge_capacity,
-                fallback_charge_percent=fallback_charge_percent,
-            )
-            ac_connected = self._ac_connected_from_power_state(
-                status.PowerState,
-                fallback_ac_connected,
-            )
-            is_charging = bool(status.PowerState & BATTERY_CHARGING)
+        charge_percent = self._calculate_charge_percent(
+            remaining_capacity=raw_remaining_capacity,
+            full_charge_capacity=raw_full_charge_capacity,
+            fallback_charge_percent=fallback_charge_percent,
+        )
+        ac_connected = self._ac_connected_from_power_state(
+            status.PowerState,
+            fallback_ac_connected,
+        )
+        is_charging = bool(status.PowerState & BATTERY_CHARGING)
 
-            windows_rate = self._normalize_rate(status.Rate)
-            net_power_mw = self._to_backend_net_power_mw(
-                windows_rate=windows_rate,
-                uses_relative_units=uses_relative_units,
-            )
+        windows_rate = self._normalize_rate(status.Rate)
+        net_power_mw = self._to_backend_net_power_mw(
+            windows_rate=windows_rate,
+            uses_relative_units=uses_relative_units,
+        )
 
-            return BatterySnapshot(
-                battery_id=device_path,
-                client_time=self._client_time(),
-                ac_connected=ac_connected,
-                is_charging=is_charging,
-                charge_percent=charge_percent,
-                remaining_capacity_mwh=remaining_capacity_mwh,
-                full_charge_capacity_mwh=full_charge_capacity_mwh,
-                design_capacity_mwh=design_capacity_mwh,
-                voltage_mv=self._normalize_voltage(status.Voltage),
-                net_power_mw=net_power_mw,
-                temperature_c=temperature_c,
-                cycle_count=self._normalize_cycle_count(info.CycleCount),
-                status=self._status_from_power_state(status.PowerState),
-            )
-        finally:
-            self._close_handle(handle)
+        return BatterySnapshot(
+            battery_id=device_path,
+            client_time=self._client_time(),
+            ac_connected=ac_connected,
+            is_charging=is_charging,
+            charge_percent=charge_percent,
+            remaining_capacity_mwh=remaining_capacity_mwh,
+            full_charge_capacity_mwh=full_charge_capacity_mwh,
+            design_capacity_mwh=design_capacity_mwh,
+            voltage_mv=self._normalize_voltage(status.Voltage),
+            net_power_mw=net_power_mw,
+            temperature_c=temperature_c,
+            cycle_count=self._normalize_cycle_count(info.CycleCount),
+            status=self._status_from_power_state(status.PowerState),
+        )
 
     def _get_system_power_status_or_none(self) -> Optional[SYSTEM_POWER_STATUS]:
         status = SYSTEM_POWER_STATUS()
@@ -508,6 +532,27 @@ class WindowsBatteryCollector:
         if handle == INVALID_HANDLE_VALUE:
             raise self._last_windows_error(f"CreateFileW failed for {device_path}")
         return handle
+
+    def _get_battery_handle(self, device_path: str) -> wintypes.HANDLE:
+        if (
+            self._cached_handle is not None
+            and self._cached_device_path == device_path
+            and self._cached_handle != INVALID_HANDLE_VALUE
+        ):
+            return self._cached_handle
+
+        self._reset_cached_handle()
+        handle = self._open_battery_handle(device_path)
+        self._cached_device_path = device_path
+        self._cached_handle = handle
+        return handle
+
+    def _reset_cached_handle(self) -> None:
+        handle = self._cached_handle
+        self._cached_handle = None
+        self._cached_device_path = None
+        if handle is not None and handle != INVALID_HANDLE_VALUE:
+            self._close_handle(handle)
 
     def _close_handle(self, handle: wintypes.HANDLE) -> None:
         if handle and handle != INVALID_HANDLE_VALUE:
