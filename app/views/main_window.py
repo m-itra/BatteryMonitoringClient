@@ -1387,7 +1387,7 @@ class LogsTab(QWidget):
         )
         self.samples_table.setColumnWidth(0, 72)
         self.samples_table.setColumnWidth(1, 220)
-        self.samples_table.setColumnWidth(2, 720)
+        self.samples_table.setColumnWidth(2, 520)
         self.samples_table.setColumnWidth(3, 300)
         self.samples_table.setColumnWidth(4, 120)
         self.samples_table.setColumnWidth(5, 160)
