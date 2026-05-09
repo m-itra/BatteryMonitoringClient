@@ -107,7 +107,6 @@ class TelemetryManager:
         self.state.current_snapshot = snapshot.to_dict()
         self.state.extra["last_observed_time"] = snapshot.client_time
         self._detect_battery_change(snapshot)
-        self._detect_required_field_warning(snapshot)
 
         should_queue, reason = self._should_queue_snapshot(snapshot)
         if not should_queue:

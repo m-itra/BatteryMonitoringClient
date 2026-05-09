@@ -43,7 +43,6 @@ from app.services.api_client import ApiError
 from app.services.settings_service import SettingsService
 from app.services.telemetry_manager import (
     BATTERY_CHANGE_NOTICE_KEY,
-    REQUIRED_TELEMETRY_WARNING_KEY,
 )
 from app.storage.secure_token_storage import TokenStorageError
 
@@ -1563,7 +1562,6 @@ class MainWindow(QMainWindow):
         self._health_check_in_progress = False
         self._upload_again_after_current = False
         self._pending_upload_callbacks: list[Callable[[], None]] = []
-        self._last_required_telemetry_warning_signature: tuple[str, ...] | None = None
         self._runtime_shutdown = False
         self.tray_icon: QSystemTrayIcon | None = None
 
@@ -1812,23 +1810,7 @@ class MainWindow(QMainWindow):
 
     def _sample_tick(self) -> None:
         self.context.telemetry_manager.collect_once()
-        self._handle_required_telemetry_warning()
         self.shell_page.refresh()
-
-    def _handle_required_telemetry_warning(self) -> None:
-        notice = self.context.telemetry_manager.state.extra.get(
-            REQUIRED_TELEMETRY_WARNING_KEY
-        )
-        if not isinstance(notice, dict):
-            self._last_required_telemetry_warning_signature = None
-            return
-
-        fields = tuple(str(field) for field in notice.get("fields", []))
-        if not fields or fields == self._last_required_telemetry_warning_signature:
-            return
-
-        self._last_required_telemetry_warning_signature = fields
-        self._block_unsupported_telemetry(notice)
 
     def _block_unsupported_telemetry(self, notice: Any) -> None:
         self.login_page.set_error(
