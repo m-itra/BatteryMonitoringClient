@@ -951,6 +951,7 @@ class StatusTab(QWidget):
         self.setObjectName("StatusTab")
         self.context = context
         self.labels: dict[str, QLabel] = {}
+        self.upload_interval_ms = self.context.settings.upload_interval_ms
         self.toggle_button = QPushButton("Начать\nмониторинг")
         self.monitoring_available = True
         self.control_notice = QLabel("")
@@ -1063,6 +1064,9 @@ class StatusTab(QWidget):
         self.control_notice.setText(message)
         self.toggle_button.setEnabled(available)
 
+    def set_upload_interval_ms(self, value: int) -> None:
+        self.upload_interval_ms = value
+
     @staticmethod
     def _metric_card(
         caption: str,
@@ -1110,7 +1114,7 @@ class StatusTab(QWidget):
         self.labels["user"].setText(auth_user.display_name if auth_user else "-")
         self.labels["device"].setText(binding.display_name if binding else "-")
         self.labels["upload_interval"].setText(
-            self._interval(self.context.settings.upload_interval_ms)
+            self._interval(self.upload_interval_ms)
         )
         self.labels["charge_percent"].setText(self._percent(snapshot.get("charge_percent")))
         self.labels["ac_connected"].setText(self._bool(snapshot.get("ac_connected")))
@@ -1593,19 +1597,25 @@ class ShellPage(QWidget):
         self.status_tab.toggle_button.clicked.connect(self.toggle_monitoring)
         self.settings_tab.switch_device_requested.connect(self.switch_device_requested.emit)
         self.settings_tab.logout_requested.connect(self.logout_requested.emit)
+        self.tabs.currentChanged.connect(self._tab_changed)
 
     def toggle_monitoring(self) -> None:
         self.monitoring_toggle_requested.emit()
 
     def refresh(self) -> None:
-        self.context.telemetry_manager.refresh_queue_size()
         self.status_tab.refresh()
 
     def refresh_logs(self) -> None:
+        if self.tabs.currentWidget() != self.logs_tab:
+            return
         self.logs_tab.refresh()
 
     def show_status_tab(self) -> None:
         self.tabs.setCurrentWidget(self.status_tab)
+
+    def _tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) == self.logs_tab:
+            self.logs_tab.refresh()
 
     def set_monitoring_available(self, available: bool, message: str = "") -> None:
         self.monitoring_available = available
@@ -1842,19 +1852,19 @@ class MainWindow(QMainWindow):
         self.sample_timer.start(SAMPLE_CHANGE_CHECK_INTERVAL_MS)
         self.upload_timer.start(self.context.settings.upload_interval_ms)
         self.refresh_timer.start(1000)
-        self.logs_timer.start(5000)
 
     def _start_local_timers(self) -> None:
         self.sample_timer.start(SAMPLE_CHANGE_CHECK_INTERVAL_MS)
         self.refresh_timer.start(1000)
-        self.logs_timer.start(5000)
 
     def _apply_timer_settings(self) -> None:
+        upload_interval_ms = self.context.settings.upload_interval_ms
+        self.shell_page.status_tab.set_upload_interval_ms(upload_interval_ms)
         if self.stack.currentWidget() == self.shell_page:
             if self.sample_timer.isActive():
                 self.sample_timer.start(SAMPLE_CHANGE_CHECK_INTERVAL_MS)
             if self.upload_timer.isActive():
-                self.upload_timer.start(self.context.settings.upload_interval_ms)
+                self.upload_timer.start(upload_interval_ms)
 
         self.shell_page.refresh()
 
@@ -1956,6 +1966,9 @@ class MainWindow(QMainWindow):
         if self._upload_in_progress:
             if ensure_next_upload:
                 self._upload_again_after_current = True
+            return
+
+        if self.context.telemetry_manager.state.queue_size <= 0 and after_finished is None:
             return
 
         self._upload_in_progress = True

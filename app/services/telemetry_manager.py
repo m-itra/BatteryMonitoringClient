@@ -119,7 +119,6 @@ class TelemetryManager:
             else:
                 self.state.sync_state = "waiting for discharge"
             self.state.last_error = None
-            self.state.queue_size = self.sample_queue.count_pending()
             if reason != self._last_skip_reason:
                 self.log_service.add(
                     "info",
@@ -263,6 +262,9 @@ class TelemetryManager:
             return
 
         previous_battery_id = self._last_observed_battery_id
+        if current_battery_id == previous_battery_id:
+            return
+
         if previous_battery_id is not None and current_battery_id != previous_battery_id:
             self.state.extra[BATTERY_CHANGE_NOTICE_KEY] = {
                 "previous_battery_id": previous_battery_id,

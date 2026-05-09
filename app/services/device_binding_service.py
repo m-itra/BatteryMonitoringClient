@@ -16,6 +16,10 @@ class DeviceBindingService:
         self.settings = settings
         self.api_client = api_client
         self.log_service = log_service
+        self._binding_cache: DeviceBinding | None = None
+        self._binding_cache_loaded = False
+        self._binding_user_key_cache: str | None = None
+        self._binding_user_key_cache_loaded = False
 
     def load_devices(self, token: str) -> list[DeviceSummary]:
         data = self.api_client.request("GET", "/api/analytics/devices", token=token)
@@ -33,22 +37,36 @@ class DeviceBindingService:
         return devices
 
     def get_binding(self) -> DeviceBinding | None:
+        if self._binding_cache_loaded:
+            return self._binding_cache
+
         device_name = self.settings.get(SettingsService.SELECTED_DEVICE_NAME)
         if not device_name:
+            self._binding_cache = None
+            self._binding_cache_loaded = True
             return None
 
         reference_capacity = self.settings.get_int(SettingsService.REFERENCE_CAPACITY_MWH)
-        return DeviceBinding(
+        self._binding_cache = DeviceBinding(
             device_id=self.settings.get(SettingsService.SELECTED_DEVICE_ID),
             device_name=device_name,
             reference_capacity_mwh=reference_capacity,
         )
+        self._binding_cache_loaded = True
+        return self._binding_cache
 
     def get_binding_user_key(self) -> str | None:
-        return self.settings.get(SettingsService.SELECTED_DEVICE_USER_KEY)
+        if not self._binding_user_key_cache_loaded:
+            self._binding_user_key_cache = self.settings.get(
+                SettingsService.SELECTED_DEVICE_USER_KEY
+            )
+            self._binding_user_key_cache_loaded = True
+        return self._binding_user_key_cache
 
     def set_binding_user_key(self, user_key: str) -> None:
         self.settings.set(SettingsService.SELECTED_DEVICE_USER_KEY, user_key)
+        self._binding_user_key_cache = user_key
+        self._binding_user_key_cache_loaded = True
 
     def bind_existing(self, device: DeviceSummary) -> DeviceBinding:
         binding = DeviceBinding(
@@ -115,10 +133,20 @@ class DeviceBindingService:
         self.settings.delete(SettingsService.SELECTED_DEVICE_NAME)
         self.settings.delete(SettingsService.SELECTED_DEVICE_USER_KEY)
         self.settings.delete(SettingsService.REFERENCE_CAPACITY_MWH)
+        self._binding_cache = None
+        self._binding_cache_loaded = True
+        self._binding_user_key_cache = None
+        self._binding_user_key_cache_loaded = True
         self.log_service.add("warning", "device", "Local device binding cleared.")
 
     def update_reference_capacity(self, reference_capacity_mwh: int | None) -> None:
         self.settings.set_int(SettingsService.REFERENCE_CAPACITY_MWH, reference_capacity_mwh)
+        if self._binding_cache_loaded and self._binding_cache is not None:
+            self._binding_cache = DeviceBinding(
+                device_id=self._binding_cache.device_id,
+                device_name=self._binding_cache.device_name,
+                reference_capacity_mwh=reference_capacity_mwh,
+            )
 
     def _persist_binding(self, binding: DeviceBinding) -> None:
         if binding.device_id:
@@ -130,3 +158,5 @@ class DeviceBindingService:
             SettingsService.REFERENCE_CAPACITY_MWH,
             binding.reference_capacity_mwh,
         )
+        self._binding_cache = binding
+        self._binding_cache_loaded = True
