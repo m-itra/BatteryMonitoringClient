@@ -7,6 +7,7 @@ from app.services.batch_upload_service import BatchUploadService
 from app.services.boot_session_service import BootSessionService
 from app.services.log_service import LogService
 from app.services.sample_queue_service import SampleQueueService
+from app.services.settings_service import SettingsService
 from windows_battery_collector import (
     BatterySnapshot,
     WindowsBatteryCollector,
@@ -47,7 +48,7 @@ class TelemetryManager:
         self._collector = collector
         self._last_skip_reason: str | None = None
         self._last_queued_sample_signature: tuple[object, ...] | None = None
-        self._last_observed_battery_id: str | None = None
+        self._last_observed_battery_id: str | None = self._stored_battery_id()
         self._last_required_fields_warning_signature: tuple[str, ...] | None = None
         self._ac_connected_confirmation_count = 0
         self._forced_ac_confirmations_remaining = 0
@@ -181,12 +182,14 @@ class TelemetryManager:
 
         self.state.current_snapshot = snapshot.to_dict()
         self.state.extra["last_observed_time"] = snapshot.client_time
+        self._detect_battery_change(snapshot)
         self._detect_required_field_warning(snapshot)
         notice = self.state.extra.get(REQUIRED_TELEMETRY_WARNING_KEY)
         return notice if isinstance(notice, dict) else None
 
     def reset_observed_battery(self) -> None:
         self._last_observed_battery_id = None
+        self.boot_session_service.settings.delete(SettingsService.LAST_OBSERVED_BATTERY_ID)
         self.state.extra.pop(BATTERY_CHANGE_NOTICE_KEY, None)
         self._last_required_fields_warning_signature = None
         self.state.extra.pop(REQUIRED_TELEMETRY_WARNING_KEY, None)
@@ -276,6 +279,17 @@ class TelemetryManager:
             )
 
         self._last_observed_battery_id = current_battery_id
+        self.boot_session_service.settings.set(
+            SettingsService.LAST_OBSERVED_BATTERY_ID,
+            current_battery_id,
+        )
+
+    def _stored_battery_id(self) -> str | None:
+        return self._normalized_battery_id(
+            self.boot_session_service.settings.get(
+                SettingsService.LAST_OBSERVED_BATTERY_ID
+            )
+        )
 
     def _detect_required_field_warning(self, snapshot: BatterySnapshot) -> None:
         missing_fields = [

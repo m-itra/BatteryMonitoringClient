@@ -27,6 +27,7 @@ class SettingsService:
     BOOT_SIGNATURE = "boot_signature"
     BOOT_SESSION_ID = "boot_session_id"
     LAST_SAMPLE_SEQ = "last_sample_seq"
+    LAST_OBSERVED_BATTERY_ID = "last_observed_battery_id"
     POLL_INTERVAL_MS = "poll_interval_ms"
     UPLOAD_INTERVAL_MS = "upload_interval_ms"
     TRAY_MODE_ENABLED = "tray_mode_enabled"

@@ -70,12 +70,15 @@ class ApiClient:
             raise ApiError("Backend returned a non-JSON response.", response.status_code) from exc
 
     def health_check(self) -> dict[str, Any]:
-        data = self.request("GET", "/health")
-        if not isinstance(data, dict):
-            raise ApiError("Health check response has an unexpected format.")
-        if str(data.get("status") or "").lower() != "healthy":
-            raise ApiError("Backend health check did not report healthy status.")
-        return data
+        try:
+            data = self.request("GET", "/health")
+            if not isinstance(data, dict):
+                raise ApiError("Health check response has an unexpected format.")
+            if str(data.get("status") or "").lower() != "healthy":
+                raise ApiError("Backend health check did not report healthy status.")
+            return data
+        except ApiError as exc:
+            return self._auth_route_health_check(exc)
 
     def close(self) -> None:
         with self._client_lock:
@@ -96,6 +99,30 @@ class ApiClient:
             )
             self._client_base_url = current_base_url
         return self._client
+
+    def _auth_route_health_check(self, original_error: ApiError) -> dict[str, Any]:
+        if httpx is None:
+            raise original_error
+
+        headers = {"Accept": "application/json"}
+        try:
+            with self._client_lock:
+                client = self._get_or_create_client()
+                response = client.get("/api/auth/me", headers=headers)
+        except httpx.HTTPError as exc:
+            raise ApiError(str(exc)) from exc
+
+        if response.status_code in {401, 403}:
+            return {
+                "status": "healthy",
+                "service": "api",
+                "source": "auth_probe",
+            }
+
+        if response.status_code >= 500:
+            raise ApiError(self._error_message(response), response.status_code)
+
+        raise original_error
 
     @staticmethod
     def _error_message(response) -> str:

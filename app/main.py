@@ -18,6 +18,11 @@ def main() -> int:
     application.setStyle("Fusion")
 
     context = AppContext()
+    try:
+        if context.settings.get_bool(context.settings.AUTOSTART_ENABLED):
+            context.platform_integration.set_autostart_enabled(True)
+    except Exception as exc:
+        context.log_service.add("error", "platform", str(exc))
     window = MainWindow(context)
     window.resize(880, 680)
     window.show()

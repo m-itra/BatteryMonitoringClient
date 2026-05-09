@@ -87,8 +87,8 @@ QGroupBox#Panel {
 }
 
 QFrame#AuthCard {
-    min-width: 440px;
-    max-width: 520px;
+    min-width: 520px;
+    max-width: 660px;
 }
 
 QFrame#MetricCard {
@@ -468,11 +468,15 @@ def _run_background(
 
 class LoginPage(QWidget):
     logged_in = Signal()
+    server_availability_changed = Signal(bool, str)
 
     def __init__(self, context: AppContext) -> None:
         super().__init__()
         self.setObjectName("LoginPage")
         self.context = context
+        self._busy = False
+        self._server_available = True
+        self._server_status_visible = False
         self.api_base_url_input = QLineEdit(self.context.settings.api_base_url)
         self.api_base_url_input.setPlaceholderText("http://127.0.0.1:3000")
         self.email_input = QLineEdit()
@@ -490,6 +494,11 @@ class LoginPage(QWidget):
         self.status_label = QLabel("")
         self.status_label.setObjectName("SectionNote")
         self.status_label.setWordWrap(True)
+        self.status_label.setMaximumHeight(52)
+        self.status_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -541,11 +550,28 @@ class LoginPage(QWidget):
         _set_standard_icon(self.login_button, "SP_DialogApplyButton")
         self.login_button.clicked.connect(self._login)
         self.password_input.returnPressed.connect(self._login)
+        self.api_base_url_input.textEdited.connect(self._server_url_edited)
 
     def set_error(self, message: str) -> None:
-        self.status_label.setText(message)
+        self._server_status_visible = False
+        self._set_status(message)
+
+    def set_server_available(self, available: bool, message: str = "") -> None:
+        self._server_available = available
+        self._update_login_button()
+        if message:
+            self._server_status_visible = True
+            self._set_status(self._compact_server_status(message), message)
+        elif available and self._server_status_visible:
+            self._server_status_visible = False
+            self._set_status("")
 
     def _login(self) -> None:
+        if not self._server_available:
+            self._set_status(
+                "Сервер недоступен. Проверка каждые 10 секунд."
+            )
+            return
         self._submit_auth("Вход...", self.context.auth_service.login)
 
     def _submit_auth(
@@ -557,11 +583,11 @@ class LoginPage(QWidget):
         email = self.email_input.text().strip()
         password = self.password_input.text()
         if not email or not password:
-            self.status_label.setText("Укажите email и пароль.")
+            self._set_status("Укажите email и пароль.")
             return
 
         self._set_busy(True)
-        self.status_label.setText(status)
+        self._set_status(status)
         _run_background(
             self,
             lambda: action(email, password),
@@ -571,30 +597,68 @@ class LoginPage(QWidget):
         )
 
     def _set_busy(self, busy: bool) -> None:
-        self.login_button.setEnabled(not busy)
+        self._busy = busy
+        self._update_login_button()
+
+    def _update_login_button(self) -> None:
+        self.login_button.setEnabled(not self._busy and self._server_available)
+
+    def _server_url_edited(self, _text: str = "") -> None:
+        if self._server_status_visible:
+            self._set_status("")
+        self._server_available = True
+        self._server_status_visible = False
+        self._update_login_button()
 
     def _auth_succeeded(self, _result: Any) -> None:
-        self.status_label.setText("")
+        self.set_server_available(True)
+        self._set_status("")
         self.logged_in.emit()
 
     def _auth_failed(self, exc: Exception) -> None:
+        if self._is_backend_unavailable_error(exc):
+            message = (
+                "Сервер недоступен. Проверка состояния выполняется каждые "
+                f"10 секунд. Подробности: {exc}"
+            )
+            self.set_server_available(False, message)
+            self.server_availability_changed.emit(False, message)
+            return
+
         if self._is_unregistered_user_error(exc):
-            self.status_label.setText(
+            self._set_status(
                 "Пользователь не зарегистрирован или данные введены неверно."
             )
             QDesktopServices.openUrl(QUrl(WEB_APP_URL))
             return
 
         if isinstance(exc, (ApiError, TokenStorageError)):
-            self.status_label.setText(str(exc))
+            self._set_status(str(exc))
         else:
-            self.status_label.setText(str(exc))
+            self._set_status(str(exc))
+
+    def _set_status(self, message: str, tooltip: str | None = None) -> None:
+        self.status_label.setText(message)
+        self.status_label.setToolTip(tooltip or message)
+
+    @staticmethod
+    def _compact_server_status(message: str) -> str:
+        normalized = message.lower()
+        if "сервер" in normalized and "недоступен" in normalized:
+            return "Сервер недоступен. Проверка каждые 10 секунд."
+        return message
 
     @staticmethod
     def _is_unregistered_user_error(exc: Exception) -> bool:
         if not isinstance(exc, ApiError):
             return False
         return exc.status_code == 401
+
+    @staticmethod
+    def _is_backend_unavailable_error(exc: Exception) -> bool:
+        return isinstance(exc, ApiError) and (
+            exc.status_code is None or exc.status_code >= 500
+        )
 
 
 class DeviceBindingPage(QWidget):
@@ -1590,6 +1654,9 @@ class MainWindow(QMainWindow):
         self.server_error_grace_timer.timeout.connect(self._server_error_grace_expired)
 
         self.login_page.logged_in.connect(self._after_authentication)
+        self.login_page.server_availability_changed.connect(
+            self._set_backend_available
+        )
         self.binding_page.binding_completed.connect(self._binding_completed)
         self.binding_page.logout_requested.connect(self._logout)
         self.binding_page.server_availability_changed.connect(
@@ -1648,7 +1715,14 @@ class MainWindow(QMainWindow):
         self._after_authentication()
 
     def _session_restore_failed(self, exc: Exception) -> None:
-        self.login_page.set_error(str(exc))
+        if self._is_backend_unavailable_error(exc):
+            self._set_backend_available(
+                False,
+                self._login_backend_unavailable_message(exc),
+                stop_monitoring=False,
+            )
+        else:
+            self.login_page.set_error(str(exc))
         self.stack.setCurrentWidget(self.login_page)
 
     def _after_authentication(self) -> None:
@@ -2100,6 +2174,9 @@ class MainWindow(QMainWindow):
         self._set_backend_available(True, "")
         if self.stack.currentWidget() == self.binding_page:
             self.binding_page.refresh_devices()
+        elif self.stack.currentWidget() == self.login_page:
+            self._restore_session()
+            return
         else:
             self._restart_monitoring_after_backend_recovery()
             self.shell_page.refresh()
@@ -2113,6 +2190,13 @@ class MainWindow(QMainWindow):
         self.shell_page.set_monitoring_available(True, "")
 
     def _health_check_failed(self, exc: Exception) -> None:
+        if self.stack.currentWidget() == self.login_page and not self._is_server_error_grace_active():
+            self.login_page.set_server_available(
+                False,
+                f"Сервер все еще недоступен. Проверка каждые 10 секунд. {exc}",
+            )
+            return
+
         if self._is_server_error_grace_active():
             message = f"{self._offline_grace_notice()} Последняя проверка состояния не удалась: {exc}"
             self.shell_page.set_monitoring_available(True, message)
@@ -2124,6 +2208,8 @@ class MainWindow(QMainWindow):
             self.shell_page.set_monitoring_available(False, message)
         if self.stack.currentWidget() == self.binding_page:
             self.binding_page.status_label.setText(message)
+        elif self.stack.currentWidget() == self.login_page:
+            self.login_page.set_server_available(False, message)
 
     def _health_check_finished(self) -> None:
         self._health_check_in_progress = False
@@ -2147,10 +2233,27 @@ class MainWindow(QMainWindow):
         controls_available = available if monitoring_available is None else monitoring_available
         self.shell_page.set_monitoring_available(controls_available, message)
         self.binding_page._set_device_selection_available(available)
+        self.login_page.set_server_available(
+            available,
+            message if self.stack.currentWidget() == self.login_page else "",
+        )
         if message and self.stack.currentWidget() == self.binding_page:
             self.binding_page.status_label.setText(message)
         if not available and stop_monitoring:
             self.context.telemetry_manager.stop()
+
+    @staticmethod
+    def _is_backend_unavailable_error(exc: Exception) -> bool:
+        return isinstance(exc, ApiError) and (
+            exc.status_code is None or exc.status_code >= 500
+        )
+
+    @staticmethod
+    def _login_backend_unavailable_message(exc: Exception) -> str:
+        return (
+            "Сервер недоступен. Вход временно заблокирован, проверка состояния "
+            f"выполняется каждые 10 секунд. {exc}"
+        )
 
     def _logout(self) -> None:
         self._stop_timers()
